@@ -1,0 +1,28 @@
+diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
+index 143af9d..6a060a5 100644
+--- a/BlackHole/BlackHole.c
++++ b/BlackHole/BlackHole.c
+@@ -236,6 +236,13 @@ struct ObjectInfo {
+ #define                             kLatency_Frame_Size                 0
+ #endif
+ 
++// MATBridge: presentation latency reported on the OUTPUT side only, in microseconds. Unlike kLatency_Frame_Size
++// (which becomes the safety offset and really delays the loopback), this only tells apps how late the audio is
++// heard, so video players can delay the picture to match. Converted to frames at the current sample rate.
++#ifndef kReported_Output_Latency_Us
++#define                             kReported_Output_Latency_Us         0
++#endif
++
+ #ifndef kNumber_Of_Channels
+ #define                             kNumber_Of_Channels                 2
+ #endif
+@@ -2658,7 +2665,8 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
+ 			//	This property returns the presentation latency of the device. For this,
+ 			//	device, the value is 0 due to the fact that it always vends silence.
+ 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyLatency for the device");
+-			*((UInt32*)outData) = 0;
++			*((UInt32*)outData) = (inAddress->mScope == kAudioObjectPropertyScopeOutput)
++				? (UInt32)((Float64)kReported_Output_Latency_Us * gDevice_SampleRate / 1000000.0 + 0.5) : 0;
+ 			*outDataSize = sizeof(UInt32);
+ 			break;
+ 
