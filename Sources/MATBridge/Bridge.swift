@@ -21,6 +21,8 @@ final class Bridge {
     private var stalledTicks = 0
     private var lastStats = Date()
     private var musicPlaying = false
+    private var musicFromProbe = false    // handed off at startup because Music was already playing
+    private var probeQuietTicks = 0
     private var reclaim: DispatchWorkItem?
     private var listeners: [PropertyListener] = []
     private var hogListener: PropertyListener?
@@ -61,6 +63,12 @@ final class Bridge {
             observers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.Music.playerInfo"), object: nil, queue: .main) { [weak self] n in
                 self?.musicChanged(n.userInfo?["Player State"] as? String ?? "?")
             })
+            // Music only announces changes, so one already playing when we start would otherwise lose the TV to us.
+            if CA.musicSendingAudio() {
+                log("Apple Music is already sending audio")
+                musicChanged("Playing")
+                musicFromProbe = true
+            }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
         tick()
@@ -189,7 +197,14 @@ final class Bridge {
     private func tick() {
         if getppid() != parentPID { log("supervisor is gone; exiting"); shutdown(); exit(0) }
         switch mode {
-        case .sleeping, .handedOff: return
+        case .sleeping: return
+        case .handedOff:
+            // Handed off at startup without a notification: Music may stop without sending one either (it was
+            // paused when we came up but still had its output running), so watch its output instead. Two quiet
+            // ticks in a row, to ride out the switch from the virtual device to the TV.
+            guard musicFromProbe else { return }
+            probeQuietTicks = CA.musicSendingAudio() ? 0 : probeQuietTicks + 1
+            if probeQuietTicks >= 2 { musicChanged("Stopped (no longer sending audio)") }
         case .waiting:
             if Date() >= nextAttempt { activate() }
         case .active:
@@ -258,6 +273,7 @@ final class Bridge {
     private func musicChanged(_ state: String) {
         log("Music: \(state)")
         musicPlaying = state == "Playing"
+        musicFromProbe = false; probeQuietTicks = 0
         reclaim?.cancel(); reclaim = nil
         if musicPlaying {
             guard mode != .handedOff else { return }

@@ -28,6 +28,12 @@ enum CA {
         guard AudioObjectGetPropertyData(o, &a, 0, nil, &size, &s) == noErr, let s else { return nil }
         return s.takeRetainedValue() as String
     }
+    /// True while Apple Music has audio output running (to any device). Core Audio's process objects need no permission.
+    static func musicSendingAudio() -> Bool {
+        ids(systemObject, addr(kAudioHardwarePropertyProcessObjectList)).contains {
+            string($0, kAudioProcessPropertyBundleID) == "com.apple.Music" && u32($0, kAudioProcessPropertyIsRunningOutput) == 1
+        }
+    }
     static func name(_ o: AudioObjectID) -> String { string(o, kAudioObjectPropertyName) ?? "?" }
     static func uid(_ o: AudioObjectID) -> String { string(o, kAudioDevicePropertyDeviceUID) ?? "" }
 
