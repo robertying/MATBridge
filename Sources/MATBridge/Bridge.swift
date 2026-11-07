@@ -82,8 +82,8 @@ final class Bridge {
         var src: AudioObjectID?
         var channels = config.channelMap ?? [0, 1, 2, 3, 4, 5]
         if testData == nil {
-            guard let s = CA.find(uid: config.sourceUID, nameContains: config.sourceName, scope: kAudioObjectPropertyScopeInput) else {
-                return fail("virtual device '\(config.sourceName)' not present")
+            guard let s = Capture.findDevice() else {
+                return fail("the MATBridge virtual device is not installed (scripts/build-driver.sh, scripts/install-driver.sh)")
             }
             src = s
             if CA.f64(s, kAudioDevicePropertyNominalSampleRate) != Double(config.rate) {
@@ -108,6 +108,7 @@ final class Bridge {
             pipeline = p; encoder = enc  // from here on teardown() must stop it, even if capture fails below
             if let cap, let src {
                 try cap.start(pipeline: p)
+                _ = cap.mixAdvanced()  // baseline for the health check
                 if config.manageDefaultOutput, CA.defaultOutput() != src {
                     log("default output '\(CA.defaultOutput().map(CA.name) ?? "?")' -> '\(CA.name(src))' status \(CA.setDefaultOutput(src))")
                 }
@@ -215,9 +216,10 @@ final class Bridge {
         if !sender.stillOurs { return "TV hog/format changed underneath us (hog \(CA.i32(sender.dev, kAudioDevicePropertyHogMode) ?? -99), format \(CA.describe(CA.physicalFormat(sender.stream))))" }
         let out = pipeline.outCallbacks.load(ordering: .relaxed), cap = pipeline.capCallbacks.load(ordering: .relaxed)
         let outStalled = out == lastOutCallbacks, capStalled = capture != nil && cap == lastCapCallbacks
-        stalledTicks = outStalled || capStalled ? stalledTicks + 1 : 0
+        let mixStalled = !(capture?.mixAdvanced() ?? true)
+        stalledTicks = outStalled || capStalled || mixStalled ? stalledTicks + 1 : 0
         lastOutCallbacks = out; lastCapCallbacks = cap
-        if stalledTicks >= 3 { return outStalled ? "TV IO stopped" : "capture IO stopped" }
+        if stalledTicks >= 3 { return outStalled ? "TV IO stopped" : capStalled ? "capture IO stopped" : "driver stopped writing the shared mix" }
         if let c = capture, CA.f64(c.dev, kAudioDevicePropertyNominalSampleRate) != Double(config.rate) { return "virtual device sample rate changed" }
         if !(encoder?.isExecuting ?? false) { return "encoder thread stopped" }
         return nil
@@ -233,7 +235,7 @@ final class Bridge {
     /// would be silent; send them to the Mac's built-in speakers instead, as macOS does without MATBridge.
     private func defaultOutputChanged() {
         guard mode == .handedOff, config.manageDefaultOutput,
-              let src = CA.find(uid: config.sourceUID, nameContains: config.sourceName, scope: kAudioObjectPropertyScopeOutput) else { return }
+              let src = Capture.findDevice() else { return }
         let def = CA.defaultOutput(), sys = CA.u32(systemObject, kAudioHardwarePropertyDefaultSystemOutputDevice)
         guard def == src || sys == src else { return }
         let tv = config.findTV(savedUID: SavedState.load()?.tvUID)
@@ -246,9 +248,9 @@ final class Bridge {
         lastStats = Date()
         guard let p = pipeline else { return }
         func l(_ a: borrowing Atomic<Int64>) -> Int64 { a.load(ordering: .relaxed) }
-        log(String(format: "stats: buffer avg %.1f ms (target %.0f), drift corr %lld ppm, dropped %lld / repeated %lld frames, underruns %lld, burst skips %lld, overflows pcm %lld burst %lld",
+        log(String(format: "stats: buffer avg %.1f ms (target %.0f), drift corr %lld ppm, dropped %lld / repeated %lld frames, underruns %lld, burst skips %lld, overflows pcm %lld burst %lld, shared-mix frames lost %lld",
                    Double(l(p.avgLevelMicros)) / 1000, config.targetMs, l(p.correctionPPM), l(p.droppedFrames), l(p.dupedFrames),
-                   l(p.underruns), l(p.skips), l(p.pcmOverflows), l(p.burstOverflows)))
+                   l(p.underruns), l(p.skips), l(p.pcmOverflows), l(p.burstOverflows), l(p.mixLost)))
     }
 
     // MARK: Apple Music hand-off

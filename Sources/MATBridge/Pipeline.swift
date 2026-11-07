@@ -1,4 +1,4 @@
-// Capture (virtual device input) -> PCM ring -> encoder thread (drift control, TrueHD/MAT) -> burst ring -> TV IOProc.
+// Capture (the driver's shared mix) -> PCM ring -> encoder thread (drift control, TrueHD/MAT) -> burst ring -> TV IOProc.
 import CTrueHD
 import CoreAudio
 import Foundation
@@ -6,6 +6,13 @@ import Synchronization
 
 let burstBytes = Int(THB_MAT_BURST_BYTES)
 let encChannels = Int(THB_CHANNELS)
+
+/// Float sample -> 32-bit integer, exact for 24-bit content. Clamps; NaN (a misbehaving app) becomes 0 instead of
+/// trapping in Int32(v).
+@inline(__always) func toS32(_ f: Float32) -> Int32 {
+    let v = Double(f) * 2147483648.0
+    return v >= 2147483647 ? .max : (v <= -2147483648 ? .min : (v.isNaN ? 0 : Int32(v)))
+}
 
 final class Pipeline: @unchecked Sendable {
     let rate: Int
@@ -26,6 +33,7 @@ final class Pipeline: @unchecked Sendable {
     let skips = Atomic<Int64>(0)
     let burstOverflows = Atomic<Int64>(0)
     let pcmOverflows = Atomic<Int64>(0)
+    let mixLost = Atomic<Int64>(0)         // frames skipped in the driver's shared mix (reader fell behind / lapped)
     let droppedFrames = Atomic<Int64>(0)
     let dupedFrames = Atomic<Int64>(0)
     let correctionPPM = Atomic<Int64>(0)
@@ -111,35 +119,31 @@ final class Pipeline: @unchecked Sendable {
         burstLive = true
     }
 
-    // MARK: capture IOProc (real-time thread)
+    // MARK: capture (the virtual device's IOProc, real-time thread)
 
-    /// `map[i]` = (buffer index, channel offset in that buffer, channels in that buffer) for output channel i.
-    func capture(_ abl: UnsafePointer<AudioBufferList>, map: [(Int, Int, Int)], scratch: UnsafeMutablePointer<Int32>, scratchFrames: Int) {
+    /// Moves everything new in the driver's shared mix into the PCM ring. `offsets[i]` = source channel for output
+    /// channel i within frames of `channels` interleaved Float32 samples.
+    func pull(_ shm: OpaquePointer, offsets: [Int], channels: Int, floats: UnsafeMutablePointer<Float32>,
+              scratch: UnsafeMutablePointer<Int32>, scratchFrames: Int) {
         capCallbacks.add(1, ordering: .relaxed)
-        let bufs = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
-        guard let first = bufs.first, first.mNumberChannels > 0 else { return }
-        var frames = Int(first.mDataByteSize) / (4 * Int(first.mNumberChannels))
-        var start = 0
-        while frames > 0 {
-            let n = min(frames, scratchFrames)
-            for (c, m) in map.enumerated() {
-                guard m.0 < bufs.count, let p = bufs[m.0].mData?.assumingMemoryBound(to: Float32.self) else {
-                    for i in 0..<n { scratch[i * encChannels + c] = 0 }; continue
-                }
-                let stride = m.2
-                var src = p + (start * stride + m.1)
+        var lost: Int64 = 0
+        var got = false
+        while true {
+            let n = Int(thb_shm_read(shm, floats, Int32(scratchFrames), &lost))
+            if n == 0 { break }
+            got = true
+            for (c, off) in offsets.enumerated() {
+                var src = floats + off
                 for i in 0..<n {
-                    let v = Double(src.pointee) * 2147483648.0
-                    // Clamp; NaN (a misbehaving app) becomes 0 instead of trapping in Int32(v).
-                    scratch[i * encChannels + c] = v >= 2147483647 ? .max : (v <= -2147483648 ? .min : (v.isNaN ? 0 : Int32(v)))
-                    src += stride
+                    scratch[i * encChannels + c] = toS32(src.pointee)
+                    src += channels
                 }
             }
             if mute { scratch.update(repeating: 0, count: n * encChannels) }
             if thb_ring_write_all(pcmRing, scratch, n * encChannels * 4) == 0 { pcmOverflows.add(1, ordering: .relaxed) }
-            frames -= n; start += n
         }
-        wake.signal()
+        if lost > 0 { mixLost.add(lost, ordering: .relaxed) }
+        if got { wake.signal() }
     }
 }
 

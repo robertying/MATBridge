@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Builds MATBridge, installs it as a background app (no Dock icon, no window) at
 # ~/Library/Application Support/MATBridge/MATBridge.app, and adds a per-user LaunchAgent that starts it at login.
-# The app bundle is what gives it the name "MATBridge" in System Settings → Login Items and in the microphone prompt.
+# The app bundle is what gives it the name "MATBridge" in System Settings → Login Items.
 # No sudo needed (install the virtual device first: scripts/build-driver.sh and scripts/install-driver.sh).
 # Extra arguments are passed to `MATBridge run`, e.g.: scripts/install.sh --rate 192000
 set -euo pipefail
@@ -20,7 +20,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 # job is fully gone, so wait for it.
 launchctl bootout "gui/$UID/$label" 2>/dev/null || true
 for i in {1..50}; do launchctl print "gui/$UID/$label" >/dev/null 2>&1 || break; sleep 0.2; done
-rm -rf "$app" "$support/bin"  # bin/: where older versions installed a bare binary
+rm -rf "$app"
 mkdir -p "$app/Contents/MacOS"
 cp .build/release/MATBridge "$bin"
 cat > "$app/Contents/Info.plist" <<EOF
@@ -37,14 +37,11 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>15.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>MATBridge captures system audio from its own virtual audio device and sends it over HDMI as Dolby TrueHD. It never uses a real microphone.</string>
 </dict>
 </plist>
 EOF
 
-# macOS asks once for microphone access (capturing from the virtual device counts as audio input). That grant
-# is tied to the code signature: sign with a stable identity so it survives updates. Without a certificate the
-# app is signed ad hoc, and macOS asks again after each reinstall.
+# Sign with the first Developer ID, else Apple Development identity, else ad hoc.
 identity=$(security find-identity -v -p codesigning | sed -nE 's/.*"(Developer ID Application: [^"]+)".*/\1/p' | head -1)
 [[ -z $identity ]] && identity=$(security find-identity -v -p codesigning | sed -nE 's/.*"(Apple Development: [^"]+)".*/\1/p' | head -1)
 codesign --force --sign "${identity:--}" "$app"

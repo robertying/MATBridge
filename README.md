@@ -18,7 +18,6 @@ It's also useful without that bug if you want lossless 5.1 from every app, not j
 - **An HDMI output whose connected sink accepts Dolby MAT (TrueHD)**: a TV with eARC passthrough, an AV receiver, or a soundbar. Check with `MATBridge devices` after building; the right output is marked `accepts Dolby MAT (TrueHD)`. macOS only offers that format while a capable sink is connected and switched on.
 - **Homebrew FFmpeg** (provides the `truehd` encoder and `spdif` muxer): `brew install ffmpeg`.
 - **Xcode**. The Command Line Tools are enough to build MATBridge itself; building the virtual audio device needs full Xcode.
-- **Microphone permission.** macOS asks for it the first time MATBridge runs on its own (as a login item), because capturing from the virtual device counts as audio input. MATBridge never opens a real microphone.
 - Optional: an Apple code-signing certificate for the driver. A Developer ID is used if you have one, otherwise an Apple Development certificate, otherwise an ad-hoc signature.
 
 ## Quick start
@@ -54,15 +53,13 @@ It's also useful without that bug if you want lossless 5.1 from every app, not j
    ```bash
    scripts/install.sh
    ```
-   Options are passed through, for example `scripts/install.sh --rate 192000`. The log is at `~/Library/Logs/MATBridge.log` and starts over once it passes 10 MB.
-
-   macOS then asks whether MATBridge may access the microphone. Click **Allow**: capturing from the virtual device counts as audio input, although MATBridge never opens a real microphone. If you have an Apple signing certificate, `install.sh` signs the app with it so the permission survives updates. The app lives in `~/Library/Application Support/MATBridge/MATBridge.app` and appears as MATBridge in System Settings → General → Login Items.
+   Options are passed through, for example `scripts/install.sh --rate 192000`. The log is at `~/Library/Logs/MATBridge.log` and starts over once it passes 10 MB. The app lives in `~/Library/Application Support/MATBridge/MATBridge.app` and appears as MATBridge in System Settings → General → Login Items.
 
 ## How it works
 
 ```
 apps ──► "MATBridge" virtual device (6 ch, the system output; reports the real latency to apps)
-            │ loopback, Float32
+            │ output mix, Float32, published by the driver in shared memory
             ▼
    capture ─► PCM ring ─► encoder thread ─────────────────────► MAT ring ─► HDMI output
    (6 channels,           drift control (drop/repeat single      (61 440-byte   (exclusive "hog" mode,
@@ -70,11 +67,12 @@ apps ──► "MATBridge" virtual device (6 ch, the system output; reports the 
     speaker layout)        → libavformat "spdif" (MAT framing)    20 ms each)    2ch 16-bit 768 kHz, raw bytes)
 ```
 
+- **Capture.** The MATBridge driver copies every output mix it receives into a POSIX shared-memory ring, and MATBridge reads that ring from an IOProc on the device. The IOProc keeps the device running and wakes MATBridge once per ~5 ms IO cycle. Its input streams are switched off, so macOS does not treat MATBridge as recording: no microphone indicator, no permission prompt. [docs/design.md](docs/design.md) explains why, and compares the alternatives.
 - **Encoder.** FFmpeg's TrueHD encoder is linked directly, not run as the `ffmpeg` command. Piping through the command added 13–97 ms of uneven buffering; the library adds a fixed 15 ms. The output is byte-identical to `ffmpeg -c:a truehd -strict experimental -f spdif`. TrueHD stores 24 bits, so 24-bit audio passes through unchanged. Encoding runs about 140× faster than real time at 48 kHz (about 47× at 192 kHz).
 - **Sender.** The HDMI output is opened exclusively ("hog mode") with mixing off and the Dolby MAT format set, then fed raw bytes. When it stops, everything is put back. On an underrun the output gets a pre-encoded *silent* MAT burst instead of nothing, so the receiver stays locked rather than clicking while it re-syncs.
 - **Clock drift.** The virtual device and the HDMI output run on different clocks. The difference is absorbed by dropping or repeating single samples before encoding, under a proportional controller capped at ±1000 ppm. In practice that's a few hundred samples while it settles after start, then close to none. This is the only place samples are changed.
 - **Real-time.** The capture and output callbacks don't allocate memory or take locks. The encoder thread runs with real-time scheduling and joins the audio device's IO workgroup.
-- **Virtual device.** It's [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2, built with 6 channels and only 48, 96 and 192 kHz, plus a small patch (`driver/reported-output-latency.patch`) described under [Latency and lip sync](#latency-and-lip-sync). Its speaker layout defaults to L R C LFE Ls Rs; MATBridge reads it and maps channels by speaker, not by number.
+- **Virtual device.** It's [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2, built with 6 channels and only 48, 96 and 192 kHz, plus two small patches: `driver/reported-output-latency.patch`, described under [Latency and lip sync](#latency-and-lip-sync), and `driver/shared-memory-mix.patch`, which publishes the mix for capture (layout in `Sources/CTrueHD/matbridge_shm.h`). Its speaker layout defaults to L R C LFE Ls Rs; MATBridge reads it and maps channels by speaker, not by number.
 
 ## Apple Music hand-off
 
@@ -92,13 +90,13 @@ Measured at 48 kHz:
 
 | Stage | ms |
 |---|---|
-| Capture from the virtual device | ~5, logged at start |
+| Capture: the driver's shared mix, read once per ~5 ms IO cycle | ~5, logged at start |
 | Pipeline: encoder (15) + MAT grouping (up to 20) + safety buffer, held at `--target-ms` | 70 (default) |
 | HDMI output; the MAT format fixes its buffer at one 20 ms burst | ~23 |
 | **Total before the receiver** | **≈ 98** |
 | Receiver's TrueHD decode | unknown, can't be measured from the Mac |
 
-Video players delay the picture by the latency the output device *reports*. Stock BlackHole reports 0, so the picture would run about 100 ms ahead of the sound. BlackHole's own latency setting doesn't help either: it also sets the "safety offset", which really delays the audio. The patch adds a latency that is only reported (output side, scaled to the current sample rate), so players hold the picture back by that much while nothing is actually delayed.
+Video players delay the picture by the latency the output device *reports*. Stock BlackHole reports 0, so the picture would run about 100 ms ahead of the sound. BlackHole's own latency setting doesn't help either: it also sets the "safety offset", which really delays the audio. `driver/reported-output-latency.patch` adds a latency that is only reported (output side, scaled to the current sample rate), so players hold the picture back by that much while nothing is actually delayed.
 
 The reported value is fixed when you build the driver: `scripts/build-driver.sh <ms>`, default 98. It's stored in microseconds and scaled to the sample rate, so `--rate` doesn't affect it. If you change `--target-ms`, rebuild the driver with the new total; MATBridge prints the breakdown when it starts. You can lower `--target-ms` at the risk of underruns, each of which is logged and heard as a short silent gap.
 
@@ -108,7 +106,7 @@ A health check runs every second and on device changes. It rebuilds the pipeline
 
 - the HDMI output disappears (TV off, cable unplugged, display sleep);
 - another app changes the output's exclusive hold or format;
-- the capture or output stops delivering audio;
+- the capture or output stops delivering audio, or the driver stops updating its shared mix;
 - the virtual device disappears or changes sample rate;
 - the encoder thread stops.
 
@@ -127,7 +125,7 @@ To restore everything by hand at any time:
 .build/release/MATBridge recover
 ```
 
-`MATBridge status` shows the output's format, who holds it, the virtual device and the saved state.
+`MATBridge status` shows the output's format, who holds it, the virtual device, whether the driver's shared mix is there, and the saved state.
 
 ## Command reference
 
@@ -135,11 +133,10 @@ To restore everything by hand at any time:
 MATBridge <command> [options]
   run        run the bridge (supervisor + worker)
   recover    restore the HDMI output and the system output; safe to run any time
-  status     show the HDMI output, virtual device and saved state
+  status     show the HDMI output, virtual device, shared mix and saved state
   devices    list audio devices; marks outputs that accept Dolby MAT
 
   --tv NAME / --tv-uid UID         HDMI output (default: the one used last time, else the first that accepts Dolby MAT)
-  --source NAME / --source-uid UID virtual device (default "MATBridge"; stock BlackHole works too: --source BlackHole)
   --rate 48000|96000|192000        TrueHD sample rate (MAT runs at 768 kHz on the wire either way)
   --target-ms MS                   pipeline buffer (default 70)
   --no-music-handoff               keep the output while Apple Music plays
@@ -168,8 +165,9 @@ When reporting a problem, include the output of `MATBridge devices` and `MATBrid
 - **48 kHz family only.** MAT runs at 768 kHz, so 44.1 kHz sources are resampled to 48 kHz by macOS.
 - **The encoder is marked experimental** in FFmpeg. It has seen far less use than Dolby's own encoder.
 - **No volume control in MATBridge.** Use your receiver's volume. If you move the MATBridge device's volume slider, samples are scaled before encoding.
+- **The shared mix is readable by any local process.** The driver runs as `_coreaudiod` and can't hand the ring to just your user, so any program on the Mac can read what plays through MATBridge. See [docs/design.md](docs/design.md).
 - **Fixed reported latency.** It's set when the driver is built, and doesn't include the receiver's decode time.
-- **Clock-drift correction drops or repeats single samples**, so those few samples aren't bit-exact.
+- **Clock-drift correction drops or repeats single samples**, so those few samples aren't bit-exact. For a minute or two after a start, while the correction settles, this can be heard as faint ticks on a pure test tone; music masks it.
 - Hard crashes cause a ~2 s gap while the supervisor restarts the worker.
 
 ## Uninstall
@@ -182,7 +180,7 @@ scripts/uninstall.sh
 sudo rm -rf /Library/Audio/Plug-Ins/HAL/MATBridge.driver && sudo killall coreaudiod
 ```
 
-The first removes the login item and the installed app, and restores the HDMI output and the system output. The second removes the virtual device. The saved state and the log stay behind in `~/Library/Application Support/MATBridge` and `~/Library/Logs/MATBridge.log`; delete them if you like.
+The first removes the login item and the installed app, and restores the HDMI output and the system output. The second removes the virtual device; its 1.5 MB shared-memory ring goes away at the next restart. The saved state and the log stay behind in `~/Library/Application Support/MATBridge` and `~/Library/Logs/MATBridge.log`; delete them if you like.
 
 ## Tested setup
 
@@ -193,9 +191,11 @@ Mac Studio (M5 Max), macOS 27.2, built-in HDMI → LG TV with eARC → 5.1.2 sou
 ```
 LICENSE                  GPL-3.0
 Sources/CTrueHD/         C: lock-free ring buffer, TrueHD encoder + MAT burst assembly (libavcodec/libavformat),
-                         IO-workgroup helper
+                         IO-workgroup helper, reader for the driver's shared mix (matbridge_shm.h: the layout
+                         shared with the driver)
 Sources/MATBridge/       Swift: CoreAudio helpers, capture, HDMI sender, pipeline, supervisor, Music hand-off, recovery
-driver/                  patch for the virtual device (BlackHole v0.7.2 is downloaded at build time)
+docs/design.md           how the system mix reaches MATBridge, and the alternatives that were measured
+driver/                  patches for the virtual device (BlackHole v0.7.2 is downloaded at build time)
 scripts/                 build-driver, install-driver, install, uninstall, make-channel-test
 prototype/bitsend.swift  the original proof of concept: plays a pre-encoded IEC 61937 file bit-exact
 ```

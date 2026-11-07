@@ -1,5 +1,6 @@
 #include "ctruehd.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -253,4 +254,90 @@ void thb_wg_leave(void *handle) {
     os_workgroup_leave(h->wg, &h->token);
     os_release(h->wg);
     free(h);
+}
+
+// ---------------------------------------------------------------- shared-memory mix (driver -> app)
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include "matbridge_shm.h"
+
+struct thb_shm {
+    const matb_shm_header *h;
+    size_t bytes;
+    uint64_t pos;      // next device sample time to read
+    uint64_t epoch;
+    int started;
+};
+
+thb_shm *thb_shm_open(char *err, int errlen) {
+    int fd = shm_open(MATB_SHM_NAME, O_RDONLY);
+    if (fd < 0) {
+        int e = errno;
+        snprintf(err, errlen, "no shared mix '%s' (%s): is the MATBridge driver installed?", MATB_SHM_NAME, strerror(e));
+        errno = e;  // callers check for ENOENT
+        return NULL;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(matb_shm_header)) { close(fd); snprintf(err, errlen, "shared mix too small"); return NULL; }
+    void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) { snprintf(err, errlen, "mmap: %s", strerror(errno)); return NULL; }
+    const matb_shm_header *h = p;
+    atomic_thread_fence(memory_order_acquire);
+    if (h->magic != MATB_SHM_MAGIC || h->version != MATB_SHM_VERSION || h->capacityFrames != MATB_SHM_FRAMES
+        || h->channels == 0 || (size_t)st.st_size < MATB_SHM_BYTES(h->channels)) {
+        snprintf(err, errlen, "shared mix has an unknown layout (magic %08x version %u)", h->magic, h->version);
+        munmap(p, (size_t)st.st_size);
+        return NULL;
+    }
+    thb_shm *s = calloc(1, sizeof(*s));
+    if (!s) { munmap(p, (size_t)st.st_size); snprintf(err, errlen, "out of memory"); return NULL; }
+    s->h = h; s->bytes = (size_t)st.st_size;
+    return s;
+}
+
+void thb_shm_close(thb_shm *s) {
+    if (!s) return;
+    munmap((void *)s->h, s->bytes);
+    free(s);
+}
+
+int thb_shm_channels(const thb_shm *s) { return (int)s->h->channels; }
+uint64_t thb_shm_rate(const thb_shm *s) { return atomic_load_explicit(&((matb_shm_header *)s->h)->sampleRateHz, memory_order_relaxed); }
+uint64_t thb_shm_writes(const thb_shm *s) { return atomic_load_explicit(&((matb_shm_header *)s->h)->writes, memory_order_relaxed); }
+
+int thb_shm_read(thb_shm *s, float *dst, int max_frames, int64_t *lost) {
+    matb_shm_header *h = (matb_shm_header *)s->h;
+    const uint64_t cap = MATB_SHM_FRAMES, ch = h->channels;
+    uint64_t e = atomic_load_explicit(&h->epoch, memory_order_acquire);
+    uint64_t w = atomic_load_explicit(&h->writeEnd, memory_order_acquire);
+    if (!s->started || e != s->epoch || w < s->pos) {   // first read, or the device clock restarted: start from now
+        s->started = 1; s->epoch = e; s->pos = w;
+        return 0;
+    }
+    uint64_t avail = w - s->pos;
+    if (avail > cap / 2) {   // fell far behind (reader stalled): skip to now rather than read frames being overwritten
+        if (lost) *lost += (int64_t)avail;
+        s->pos = w;
+        return 0;
+    }
+    uint64_t n = avail < (uint64_t)max_frames ? avail : (uint64_t)max_frames;
+    if (n == 0) return 0;
+    uint64_t at = s->pos % cap, first = cap - at < n ? cap - at : n;
+    memcpy(dst, h->data + at * ch, first * ch * sizeof(float));
+    memcpy(dst + first * ch, h->data, (n - first) * ch * sizeof(float));
+    // The copy is only valid if the writer did not restart or reach our frames meanwhile. It may be writing up to one
+    // IO buffer past writeEnd already, so keep a margin of cap/8 (far more than any IO buffer).
+    atomic_thread_fence(memory_order_acquire);
+    uint64_t w2 = atomic_load_explicit(&h->writeEnd, memory_order_acquire);
+    if (atomic_load_explicit(&h->epoch, memory_order_acquire) != e || w2 < s->pos || w2 - s->pos > cap - cap / 8) {
+        if (lost) *lost += (int64_t)n;
+        s->started = 0;
+        return 0;
+    }
+    s->pos += n;
+    return (int)n;
 }

@@ -1,4 +1,5 @@
-// The TV side (exclusive, encoded format) and the capture side (virtual device input).
+// The TV side (exclusive, encoded format) and the capture side (the virtual device's shared mix).
+import CTrueHD
 import CoreAudio
 import Foundation
 
@@ -93,59 +94,115 @@ final class TVSender {
     }
 }
 
-/// Reads the first six speaker channels from the virtual device's input (loopback) side.
+/// Reads the system mix from the MATBridge virtual device.
+///
+/// The driver copies every output mix it receives into a shared-memory ring (`matbridge_shm.h`). We run one IOProc on
+/// the device with its input streams switched off: it writes silence (which adds nothing to the mix), keeps the
+/// device's IO and clock running, and wakes us once per IO cycle to move the new frames into the pipeline. Because no
+/// input stream is ever used, macOS does not treat MATBridge as recording audio.
 final class Capture {
     let dev: AudioObjectID
-    let map: [(Int, Int, Int)]
+    private let shm: OpaquePointer
+    private let offsets: [Int]       // source channel for FL FR FC LFE SL SR within a ring frame
+    private let channels: Int        // channels per ring frame
     private var procID: AudioDeviceIOProcID?
-    private let scratch: UnsafeMutablePointer<Int32>
     private let scratchFrames = 2048
+    private let floats: UnsafeMutablePointer<Float32>
+    private let scratch: UnsafeMutablePointer<Int32>
+    private var lastWrites: UInt64 = .max
 
-    /// - Parameter channels: source channel index (0-based, across the input buffers) for FL FR FC LFE SL SR.
+    /// UID of the device scripts/build-driver.sh builds.
+    static let deviceUID = "MATBridge_UID"
+    static func findDevice() -> AudioObjectID? {
+        CA.device(uid: deviceUID).flatMap { CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 ? $0 : nil }
+    }
+
+    /// - Parameter channels: source channel index (0-based) for FL FR FC LFE SL SR.
     init(dev: AudioObjectID, channels: [Int]) throws {
         self.dev = dev
-        guard let s = CA.streams(dev, kAudioObjectPropertyScopeInput).first else { throw ConfigError("source has no input stream") }
-        let f = CA.virtualFormat(s)
-        guard f.mFormatID == kAudioFormatLinearPCM, f.mFormatFlags & kAudioFormatFlagIsFloat != 0, f.mBitsPerChannel == 32 else {
-            throw ConfigError("source input format is \(CA.describe(f)), expected Float32")
+        var err = [CChar](repeating: 0, count: 256)
+        var h = thb_shm_open(&err, 256)
+        if h == nil, errno == ENOENT {
+            // The driver creates the ring when the device's IO first starts (after a reboot or coreaudiod restart,
+            // nothing may have played yet). Start IO the same way capture does and wait for it.
+            h = Capture.startIOBriefly(dev) { thb_shm_open(&err, 256) }
         }
-        // Map device channel numbers to (buffer, offset, channels-in-buffer) using the stream configuration.
-        var a = addr(kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput); var size: UInt32 = 0
-        AudioObjectGetPropertyDataSize(dev, &a, 0, nil, &size)
-        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: 16); defer { raw.deallocate() }
-        AudioObjectGetPropertyData(dev, &a, 0, nil, &size, raw)
-        var layout: [(Int, Int, Int)] = []
-        for (bi, b) in UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self)).enumerated() {
-            for c in 0..<Int(b.mNumberChannels) { layout.append((bi, c, Int(b.mNumberChannels))) }
+        guard let h else { throw ConfigError("virtual device: \(String(cString: err))") }
+        let ch = Int(thb_shm_channels(h))
+        guard let mx = channels.max(), mx < ch else {
+            thb_shm_close(h); throw ConfigError("the shared mix has \(ch) channels; need channel \((channels.max() ?? 0) + 1)")
         }
-        guard let mx = channels.max(), mx < layout.count else { throw ConfigError("source has \(layout.count) input channels; need channel \((channels.max() ?? 0) + 1)") }
-        map = channels.map { layout[$0] }
+        shm = h; offsets = channels; self.channels = ch
+        floats = .allocate(capacity: scratchFrames * ch)
         scratch = .allocate(capacity: scratchFrames * encChannels)
     }
-    deinit { stop(); scratch.deallocate() }
+    deinit { stop(); floats.deallocate(); scratch.deallocate(); thb_shm_close(shm) }
 
     func start(pipeline: Pipeline) throws {
         // Small IO buffer = less latency and jitter; ~5 ms.
         CA.setU32(dev, kAudioDevicePropertyBufferFrameSize, UInt32(max(128, pipeline.rate / 200)))
-        let map = self.map, scratch = self.scratch, sf = scratchFrames
-        var st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { _, input, _, _, _ in
-            pipeline.capture(input, map: map, scratch: scratch, scratchFrames: sf)
+        let shm = self.shm, offsets = self.offsets, ch = channels, floats = self.floats, scratch = self.scratch, sf = scratchFrames
+        var st = AudioDeviceCreateIOProcIDWithBlock(&procID, dev, nil) { _, _, _, out, _ in
+            Capture.silence(out)
+            pipeline.pull(shm, offsets: offsets, channels: ch, floats: floats, scratch: scratch, scratchFrames: sf)
         }
-        guard st == noErr, procID != nil else { throw ConfigError("capture IOProc create failed (\(st))") }
-        st = AudioDeviceStart(dev, procID)
-        guard st == noErr else { throw ConfigError("capture start failed (\(st))") }
+        guard st == noErr, let proc = procID else { throw ConfigError("capture IOProc create failed (\(st))") }
+        st = Capture.disableInputStreams(dev, proc)
+        guard st == noErr else { stop(); throw ConfigError("could not turn off input streams for the capture IOProc (\(st))") }
+        st = AudioDeviceStart(dev, proc)
+        guard st == noErr else { stop(); throw ConfigError("capture start failed (\(st))") }
     }
 
     func stop() {
         if let p = procID { AudioDeviceStop(dev, p); AudioDeviceDestroyIOProcID(dev, p); procID = nil }
     }
 
-    /// Input-side latency in seconds: what the app wrote is this old when our IOProc sees it.
+    /// False if the driver wrote nothing since the previous call.
+    func mixAdvanced() -> Bool {
+        let w = thb_shm_writes(shm); defer { lastWrites = w }
+        return w != lastWrites
+    }
+
+    /// How old the audio is when it reaches the pipeline, in seconds: the driver publishes each mix for an output time
+    /// about one IO buffer ahead, and we read it at our next IO cycle, so roughly one IO buffer.
     var latency: Double {
-        let rate = CA.f64(dev, kAudioDevicePropertyNominalSampleRate) ?? 48000
-        let fr = (CA.u32(dev, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeInput) ?? 0)
-            + (CA.u32(dev, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeInput) ?? 0)
-            + (CA.u32(dev, kAudioDevicePropertyBufferFrameSize) ?? 0)
-        return Double(fr) / rate
+        Double(CA.u32(dev, kAudioDevicePropertyBufferFrameSize) ?? 0) / (CA.f64(dev, kAudioDevicePropertyNominalSampleRate) ?? 48000)
+    }
+
+    private static func silence(_ out: UnsafeMutablePointer<AudioBufferList>) {
+        for buf in UnsafeMutableAudioBufferListPointer(out) { if let d = buf.mData { memset(d, 0, Int(buf.mDataByteSize)) } }
+    }
+
+    /// Runs a silent, input-off IOProc on `dev` for up to 1 s, calling `attempt` until it returns non-nil.
+    private static func startIOBriefly(_ dev: AudioObjectID, _ attempt: () -> OpaquePointer?) -> OpaquePointer? {
+        var proc: AudioDeviceIOProcID?
+        guard AudioDeviceCreateIOProcIDWithBlock(&proc, dev, nil, { _, _, _, out, _ in silence(out) }) == noErr, let proc else { return nil }
+        defer { AudioDeviceStop(dev, proc); AudioDeviceDestroyIOProcID(dev, proc) }
+        guard disableInputStreams(dev, proc) == noErr, AudioDeviceStart(dev, proc) == noErr else { return nil }
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.05)
+            if let h = attempt() { return h }
+        }
+        return nil
+    }
+
+    /// By default the HAL hands every IOProc the device's input streams too, and that alone counts as recording
+    /// (kAudioProcessPropertyIsRunningInput = 1, the orange indicator). Switch them all off for `proc`.
+    private static func disableInputStreams(_ dev: AudioObjectID, _ proc: AudioDeviceIOProcID) -> OSStatus {
+        var a = addr(kAudioDevicePropertyIOProcStreamUsage, kAudioObjectPropertyScopeInput)
+        var size: UInt32 = 0
+        var st = AudioObjectGetPropertyDataSize(dev, &a, 0, nil, &size)
+        guard st == noErr else { return st }
+        guard size >= UInt32(MemoryLayout<AudioHardwareIOProcStreamUsage>.size) else { return noErr }  // no input streams
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: Int(size), alignment: 16); defer { raw.deallocate() }
+        let usage = raw.assumingMemoryBound(to: AudioHardwareIOProcStreamUsage.self)
+        usage.pointee.mIOProc = unsafeBitCast(proc, to: UnsafeMutableRawPointer.self)
+        st = AudioObjectGetPropertyData(dev, &a, 0, nil, &size, raw)
+        guard st == noErr else { return st }
+        let n = Int(usage.pointee.mNumberStreams)
+        withUnsafeMutablePointer(to: &usage.pointee.mStreamIsOn) {
+            $0.withMemoryRebound(to: UInt32.self, capacity: n) { for i in 0..<n { $0[i] = 0 } }
+        }
+        return AudioObjectSetPropertyData(dev, &a, 0, nil, size, raw)
     }
 }

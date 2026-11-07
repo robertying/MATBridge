@@ -16,8 +16,6 @@ func log(_ s: String) {
 struct Config {
     var tvName: String? = nil         // nil: auto-detect the output that offers Dolby MAT
     var tvUID: String? = nil
-    var sourceName = "MATBridge"
-    var sourceUID: String? = nil
     var rate = 48000
     var targetMs = 70.0               // buffered audio between capture and the TV IOProc
     var musicHandoff = true
@@ -42,8 +40,6 @@ struct Config {
       --tv NAME             HDMI output name substring (default: the one used last time, else the first
                             output that accepts Dolby MAT)
       --tv-uid UID          HDMI output UID (takes precedence over --tv)
-      --source NAME         virtual device name substring (default "MATBridge"; e.g. "BlackHole" for stock BlackHole)
-      --source-uid UID
       --rate HZ             48000 (default), 96000 or 192000
       --target-ms MS        pipeline buffer target (default 70)
       --no-music-handoff    keep the HDMI output even while Apple Music plays
@@ -67,8 +63,6 @@ struct Config {
             switch args[i] {
             case "--tv": c.tvName = try next()
             case "--tv-uid": c.tvUID = try next()
-            case "--source": c.sourceName = try next()
-            case "--source-uid": c.sourceUID = try next()
             case "--rate":
                 guard let r = Int(try next()), [48000, 96000, 192000].contains(r) else { throw ConfigError("--rate must be 48000, 96000 or 192000 (the 48 kHz family; MAT runs at 768 kHz)") }
                 c.rate = r
@@ -119,7 +113,6 @@ struct SavedState: Codable {
     var bytesPerFrame: UInt32, channels: UInt32, bits: UInt32
     var workerPID: Int32
     var dirty: Bool? = nil             // true while the TV is (possibly) changed by us and not yet restored
-    var defaultOutputUID: String? = nil // no longer used (kept so older state files still decode)
 
     init(tvUID: String, format f: AudioStreamBasicDescription, pid: Int32) {
         self.tvUID = tvUID; formatID = f.mFormatID; sampleRate = f.mSampleRate; formatFlags = f.mFormatFlags

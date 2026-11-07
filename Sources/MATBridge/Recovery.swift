@@ -1,4 +1,5 @@
 // Puts the HDMI output back into normal shared PCM mode. Safe to run any time, any number of times.
+import CTrueHD
 import CoreAudio
 import Foundation
 
@@ -60,7 +61,7 @@ enum Recovery {
     /// device or the built-in speakers (what MATBridge or macOS put there), never a device the user picked.
     static func restoreDefaultOutput(_ config: Config, tv: AudioObjectID?) {
         guard config.manageDefaultOutput, let def = CA.defaultOutput() else { return }
-        let src = CA.find(uid: config.sourceUID, nameContains: config.sourceName, scope: kAudioObjectPropertyScopeOutput)
+        let src = Capture.findDevice()
         let builtIn = CA.devices().first { CA.uid($0).hasPrefix("BuiltIn") && CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 }
         guard let want = tv ?? builtIn, want != def, def == src || def == builtIn else { return }
         log("recover: default output '\(CA.name(def))' -> '\(CA.name(want))' status \(CA.setDefaultOutput(want))")
@@ -77,10 +78,15 @@ enum Recovery {
             let so = CA.u32(tv, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput) ?? 0
             print("         device latency \(lat) frames, safety offset \(so) frames")
         } else { print("TV:      not found (\(config.tvDescription))") }
-        if let src = CA.find(uid: config.sourceUID, nameContains: config.sourceName, scope: kAudioObjectPropertyScopeInput) {
+        if let src = Capture.findDevice() {
             let labels = CA.preferredChannelLabels(src, kAudioObjectPropertyScopeOutput)?.map(labelName).joined(separator: " ") ?? "unknown"
             print("Source:  '\(CA.name(src))' uid \(CA.uid(src)), \(Int(CA.f64(src, kAudioDevicePropertyNominalSampleRate) ?? 0)) Hz, speaker layout: \(labels)")
-        } else { print("Source:  not found ('\(config.sourceName)') — is the MATBridge driver installed? (scripts/build-driver.sh, scripts/install-driver.sh)") }
+        } else { print("Source:  not found — is the MATBridge driver installed? (scripts/build-driver.sh, scripts/install-driver.sh)") }
+        var err = [CChar](repeating: 0, count: 256)
+        if let h = thb_shm_open(&err, 256) {
+            print("Shared mix: \(thb_shm_channels(h)) ch, \(thb_shm_rate(h)) Hz, \(thb_shm_writes(h)) writes so far")
+            thb_shm_close(h)
+        } else { print("Shared mix: \(String(cString: err))") }
         if let d = CA.defaultOutput() { print("Default output: '\(CA.name(d))'") }
         if let saved { print("Saved state: TV original format \(CA.describe(saved.format)), last worker pid \(saved.workerPID)\(CA.pidAlive(saved.workerPID) ? " (running)" : ""), TV \(saved.dirty == true ? "possibly still changed by the bridge" : "restored")") }
     }

@@ -44,4 +44,17 @@ void thb_enc_destroy(thb_enc *e);
 void *thb_wg_join_device(uint32_t audio_device_id);
 void thb_wg_leave(void *handle);
 
+// ---- Shared-memory mix written by the MATBridge driver (matbridge_shm.h). Read-only mapping; one reader thread. ----
+typedef struct thb_shm thb_shm;
+// Returns NULL with a message in `err`; errno is ENOENT when the ring does not exist (yet).
+thb_shm *thb_shm_open(char *err, int errlen);
+void thb_shm_close(thb_shm *s);
+int thb_shm_channels(const thb_shm *s);
+uint64_t thb_shm_rate(const thb_shm *s);
+uint64_t thb_shm_writes(const thb_shm *s);
+// Real-time safe. Copies up to `max_frames` new interleaved Float32 frames into `dst` and returns how many. Returns 0
+// (and resynchronizes to the newest frame) on the first call and whenever the device clock restarted; frames that
+// had to be skipped are added to *lost.
+int thb_shm_read(thb_shm *s, float *dst, int max_frames, int64_t *lost);
+
 #endif

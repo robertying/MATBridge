@@ -1,7 +1,9 @@
 #!/bin/zsh
 # Builds the "MATBridge" virtual audio device: BlackHole v0.7.2 (GPL-3.0, github.com/ExistentialAudio/BlackHole)
 # with 6 channels, 48/96/192 kHz only, and driver/reported-output-latency.patch, which makes the device tell apps
-# how late its audio is actually heard (so video players delay the picture to match), without adding any delay.
+# how late its audio is actually heard (so video players delay the picture to match), without adding any delay,
+# and driver/shared-memory-mix.patch, which publishes the output mix in shared memory (Sources/CTrueHD/
+# matbridge_shm.h) so MATBridge never opens the device's input side (no microphone indicator or permission).
 #
 # usage: scripts/build-driver.sh [latency-ms] [signing identity]
 #   latency-ms  what to report. Default 98 = capture 5 + pipeline (--target-ms) 70 + TV output 22.8, as MATBridge
@@ -27,8 +29,9 @@ mkdir -p "$root"
 if [[ ! -d $src ]]; then
   git -c advice.detachedHead=false clone -q --branch $tag --depth 1 https://github.com/ExistentialAudio/BlackHole.git "$src"
 fi
-git -C "$src" checkout -q -- .
+git -C "$src" reset -q --hard "$tag^{commit}"
 git -C "$src" apply "$PWD/driver/reported-output-latency.patch"
+git -C "$src" apply "$PWD/driver/shared-memory-mix.patch"
 
 latency_us=$(( latency_ms * 1000 ))
 bundle=io.ruiying.matbridge.driver
@@ -39,6 +42,7 @@ xcodebuild -quiet \
   -configuration Release \
   -derivedDataPath "$root/xcode" \
   CODE_SIGNING_ALLOWED=NO \
+  HEADER_SEARCH_PATHS="$PWD/Sources/CTrueHD" \
   PRODUCT_BUNDLE_IDENTIFIER=$bundle \
   GCC_PREPROCESSOR_DEFINITIONS='$GCC_PREPROCESSOR_DEFINITIONS
   kDriver_Name=\"MATBridge\"

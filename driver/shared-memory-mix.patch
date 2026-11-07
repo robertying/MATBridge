@@ -1,0 +1,114 @@
+diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
+index 6a060a5..a679195 100644
+--- a/BlackHole/BlackHole.c
++++ b/BlackHole/BlackHole.c
+@@ -20,6 +20,12 @@
+ #include <sys/syslog.h>
+ #include <Accelerate/Accelerate.h>
+ #include <Availability.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include "matbridge_shm.h"
+ 
+ //==================================================================================================
+ #pragma mark -
+@@ -346,6 +352,68 @@ static const UInt32                 kDevice_SampleRatesSize             = sizeof
+ #define                             kRing_Buffer_Frame_Size             ((65536 + kLatency_Frame_Size))
+ static Float32*                     gRingBuffer = NULL;
+ 
++// MATBridge: the output mix is also copied into a POSIX shared-memory ring (see matbridge_shm.h), so the MATBridge
++// app can read system audio without running input IO on this device, which macOS treats as microphone use.
++// Created on the first StartIO (under the state mutex, never on the IO thread) and kept for the life of the driver
++// process. An existing object of the right size is reused, so a reader's mapping survives a coreaudiod restart.
++static matb_shm_header*             gShm = NULL;
++
++static void MATB_ShmMapIfNeeded(void)
++{
++    if (gShm != NULL) { return; }
++    const size_t bytes = MATB_SHM_BYTES(kNumber_Of_Channels);
++    int fd = shm_open(MATB_SHM_NAME, O_RDWR, 0);
++    if (fd >= 0)
++    {
++        struct stat st;
++        if (fstat(fd, &st) != 0 || (size_t)st.st_size != bytes) { close(fd); fd = -1; shm_unlink(MATB_SHM_NAME); }
++    }
++    if (fd < 0)
++    {
++        fd = shm_open(MATB_SHM_NAME, O_RDWR | O_CREAT | O_EXCL, 0644);
++        if (fd < 0) { syslog(LOG_ERR, "MATBridge: shm_open failed (%d)", errno); return; }
++        fchmod(fd, 0644);   // readable by the (unprivileged) MATBridge app regardless of the host's umask
++        if (ftruncate(fd, (off_t)bytes) != 0) { syslog(LOG_ERR, "MATBridge: ftruncate failed (%d)", errno); close(fd); shm_unlink(MATB_SHM_NAME); return; }
++    }
++    void* p = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (p == MAP_FAILED) { syslog(LOG_ERR, "MATBridge: mmap failed (%d)", errno); return; }
++    matb_shm_header* h = (matb_shm_header*)p;
++    if (h->magic != MATB_SHM_MAGIC || h->version != MATB_SHM_VERSION || h->channels != kNumber_Of_Channels || h->capacityFrames != MATB_SHM_FRAMES)
++    {
++        h->version = MATB_SHM_VERSION;
++        h->channels = kNumber_Of_Channels;
++        h->capacityFrames = MATB_SHM_FRAMES;
++        atomic_thread_fence(memory_order_release);
++        h->magic = MATB_SHM_MAGIC;
++    }
++    gShm = h;
++}
++
++// IO thread: copy one WriteMix buffer into the ring, applying the device's mute and volume exactly like the loopback
++// (ReadInput) path does, then publish the new end position.
++static void MATB_ShmWrite(const Float32* inMix, UInt64 inSampleTime, UInt32 inFrames)
++{
++    matb_shm_header* h = gShm;
++    if (h == NULL || inFrames == 0 || inFrames > MATB_SHM_FRAMES) { return; }
++    UInt32 pos = (UInt32)(inSampleTime % MATB_SHM_FRAMES);
++    UInt32 first = MATB_SHM_FRAMES - pos;
++    if (first > inFrames) { first = inFrames; }
++    UInt32 parts[2][3] = { { pos, 0, first }, { 0, first, inFrames - first } };   // dst frame, src frame, frames
++    for (int i = 0; i < 2; i++)
++    {
++        if (parts[i][2] == 0) { continue; }
++        Float32* dst = h->data + (size_t)parts[i][0] * kNumber_Of_Channels;
++        const Float32* src = inMix + (size_t)parts[i][1] * kNumber_Of_Channels;
++        vDSP_Length n = (vDSP_Length)parts[i][2] * kNumber_Of_Channels;
++        if (gMute_Master_Value) { vDSP_vclr(dst, 1, n); }
++        else if (kEnableVolumeControl && gVolume_Master_Value != 1.0f) { vDSP_vsmul(src, 1, &gVolume_Master_Value, dst, 1, n); }
++        else { memcpy(dst, src, n * sizeof(Float32)); }
++    }
++    atomic_store_explicit(&h->writeEnd, inSampleTime + inFrames, memory_order_release);
++    atomic_fetch_add_explicit(&h->writes, 1, memory_order_relaxed);
++}
++
+ 
+ //==================================================================================================
+ #pragma mark -
+@@ -4350,6 +4418,14 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
+         gDevice_AnchorHostTime = mach_absolute_time();
+         gDevice_PreviousTicks = 0;
+         gRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
++        // MATBridge: the sample clock restarts at 0; tell the shared-memory reader to resynchronize.
++        MATB_ShmMapIfNeeded();
++        if (gShm != NULL)
++        {
++            atomic_store_explicit(&gShm->sampleRateHz, (uint64_t)gDevice_SampleRate, memory_order_relaxed);
++            atomic_store_explicit(&gShm->writeEnd, 0, memory_order_relaxed);
++            atomic_fetch_add_explicit(&gShm->epoch, 1, memory_order_release);
++        }
+     }
+     
+     
+@@ -4606,6 +4682,12 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
+         memcpy(gRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, ioMainBuffer, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+         memcpy(gRingBuffer, (Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
+         
++        // MATBridge: publish the same mix to the shared-memory ring (main device only; the hidden mirror is ignored).
++        if (inDeviceObjectID == kObjectID_Device)
++        {
++            MATB_ShmWrite((const Float32*)ioMainBuffer, (UInt64)inIOCycleInfo->mOutputTime.mSampleTime, inIOBufferFrameSize);
++        }
++
+         // Save the last output time.
+         lastOutputSampleTime = inIOCycleInfo->mOutputTime.mSampleTime + inIOBufferFrameSize;
+         isBufferClear = false;
