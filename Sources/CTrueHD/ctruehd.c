@@ -47,8 +47,6 @@ size_t thb_ring_readable(const thb_ring *r) {
     return h - t;
 }
 
-size_t thb_ring_writable(const thb_ring *r) { return r->cap - thb_ring_readable(r); }
-
 int thb_ring_write_all(thb_ring *r, const void *src, size_t len) {
     size_t h = atomic_load_explicit(&r->head, memory_order_relaxed);
     size_t t = atomic_load_explicit(&r->tail, memory_order_acquire);
@@ -90,7 +88,6 @@ struct thb_enc {
     // burst assembly from the muxer's byte stream
     uint8_t asm_buf[THB_MAT_BURST_BYTES * 2];
     int asm_len;
-    int64_t resyncs;
 };
 
 static const uint8_t kSync[4] = {0x72, 0xF8, 0x1F, 0x4E};  // Pa=0xF872 Pb=0x4E1F, little-endian words
@@ -104,7 +101,6 @@ static void assemble(thb_enc *e) {
             while (i + 4 <= e->asm_len && memcmp(e->asm_buf + i, kSync, 4) != 0) i += 2;
             memmove(e->asm_buf, e->asm_buf + i, e->asm_len - i);
             e->asm_len -= i;
-            e->resyncs++;
             continue;
         }
         if (e->asm_len < THB_MAT_BURST_BYTES) return;
@@ -122,7 +118,7 @@ static int io_write(void *opaque, const uint8_t *buf, int size) {
         memcpy(e->asm_buf + e->asm_len, buf, n);
         e->asm_len += n; buf += n; size -= n;
         assemble(e);
-        if (e->asm_len == (int)sizeof(e->asm_buf)) { e->asm_len = 0; e->resyncs++; }  // garbage; start over
+        if (e->asm_len == (int)sizeof(e->asm_buf)) { e->asm_len = 0; }  // garbage; start over
     }
     return 0;
 }
@@ -217,9 +213,6 @@ int thb_enc_push(thb_enc *e, const int32_t *in, int frames) {
     }
     return 0;
 }
-
-int thb_enc_frame_size(const thb_enc *e) { return e->frame_size; }
-int64_t thb_enc_resyncs(const thb_enc *e) { return e->resyncs; }
 
 void thb_enc_destroy(thb_enc *e) {
     if (!e) return;

@@ -94,7 +94,7 @@ extension Config {
             uid.flatMap(CA.device(uid:)).flatMap { CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 ? $0 : nil }
         }
         if let tvUID { return output(tvUID) }
-        if let n = tvName { return CA.find(uid: nil, nameContains: n, scope: kAudioObjectPropertyScopeOutput) }
+        if let n = tvName { return CA.find(nameContains: n, scope: kAudioObjectPropertyScopeOutput) }
         if let d = output(savedUID) { return d }  // the TV used last time, even while another app holds it
         return CA.devices().first { d in
             guard let s = CA.streams(d, kAudioObjectPropertyScopeOutput).first else { return false }

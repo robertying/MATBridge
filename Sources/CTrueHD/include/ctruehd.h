@@ -11,7 +11,6 @@ typedef struct thb_ring thb_ring;
 thb_ring *thb_ring_create(size_t capacity);
 void thb_ring_destroy(thb_ring *r);
 size_t thb_ring_readable(const thb_ring *r);
-size_t thb_ring_writable(const thb_ring *r);
 // Writes all `len` bytes or nothing. Returns 1 if written, 0 if there was not enough room.
 int thb_ring_write_all(thb_ring *r, const void *src, size_t len);
 // Reads up to `len` bytes, returns how many were read.
@@ -33,9 +32,6 @@ thb_enc *thb_enc_create(int rate, thb_burst_fn cb, void *ctx, char *err, int err
 // `frames` frames of interleaved int32 samples in FL FR FC LFE SL SR order (TrueHD keeps the top 24 bits).
 // Returns 0 on success, a negative AVERROR on failure.
 int thb_enc_push(thb_enc *e, const int32_t *interleaved, int frames);
-int thb_enc_frame_size(const thb_enc *e);
-// Bursts whose preamble was not where expected (should stay 0).
-int64_t thb_enc_resyncs(const thb_enc *e);
 void thb_enc_destroy(thb_enc *e);
 
 // ---- Real-time help: join a CoreAudio device's IO thread workgroup (Apple silicon P-core scheduling). ----

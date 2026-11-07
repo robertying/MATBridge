@@ -44,6 +44,14 @@ case "worker":
 
 case "run":
     logPrefix = " [supervisor \(getpid())]"
+    // One bridge at a time: a second one (a manual `run` next to the login item) would fight over the TV, and its
+    // cleanup would release the hog the first one holds. The lock goes away with the process, however it ends.
+    let lockPath = SavedState.url.deletingLastPathComponent().appendingPathComponent("run.lock").path
+    let lockFD = open(lockPath, O_RDWR | O_CREAT | O_CLOEXEC, 0o644)
+    if lockFD < 0 || flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+        log("MATBridge is already running (the login item?); not starting a second one")
+        exit(1)
+    }
     // When stdout is a log file (the login item), start it over once it passes 10 MB. It is opened for
     // appending, so writes simply continue at the new end.
     var st = stat()

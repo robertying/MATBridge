@@ -5,7 +5,7 @@ import Foundation
 import Synchronization
 
 final class Bridge {
-    enum Mode: String { case waiting, active, handedOff, sleeping }
+    enum Mode: String { case waiting, active, handedOff }
 
     let config: Config
     private(set) var mode = Mode.waiting
@@ -22,7 +22,9 @@ final class Bridge {
     private var lastStats = Date()
     private var musicPlaying = false
     private var musicFromProbe = false    // handed off at startup because Music was already playing
-    private var probeQuietTicks = 0
+    private var musicQuietTicks = 0
+    private var asleep = false
+    private var activatedOnce = false
     private var reclaim: DispatchWorkItem?
     private var listeners: [PropertyListener] = []
     private var hogListener: PropertyListener?
@@ -51,23 +53,23 @@ final class Bridge {
         observers.append(ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             log("system going to sleep")
+            asleep = true
             if mode == .active { deactivate("system sleep") }
-            if mode != .handedOff { mode = .sleeping }
         })
         observers.append(ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             log("system woke")
-            if mode == .sleeping { mode = .waiting; nextAttempt = Date().addingTimeInterval(2) }
+            asleep = false
+            if mode == .waiting { nextAttempt = Date().addingTimeInterval(2) }
         })
         if config.musicHandoff {
             observers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.Music.playerInfo"), object: nil, queue: .main) { [weak self] n in
                 self?.musicChanged(n.userInfo?["Player State"] as? String ?? "?")
             })
             // Music only announces changes, so one already playing when we start would otherwise lose the TV to us.
-            if CA.musicSendingAudio() {
+            if CA.musicOutputState() == .sending {
                 log("Apple Music is already sending audio")
-                musicChanged("Playing")
-                musicFromProbe = true
+                musicChanged("Playing", fromProbe: true)
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
@@ -117,11 +119,14 @@ final class Bridge {
             if let cap, let src {
                 try cap.start(pipeline: p)
                 _ = cap.mixAdvanced()  // baseline for the health check
-                if config.manageDefaultOutput, CA.defaultOutput() != src {
+                // Take the system output the first time, and later only back from the TV or the built-in speakers
+                // (where the hand-off or macOS put it), never from a device the user picked meanwhile.
+                let def = CA.defaultOutput()
+                if config.manageDefaultOutput, def != src, !activatedOnce || def == nil || def == tvDev || def == CA.builtInOutput() {
                     log("default output '\(CA.defaultOutput().map(CA.name) ?? "?")' -> '\(CA.name(src))' status \(CA.setDefaultOutput(src))")
                 }
             }
-            mode = .active; lastFailure = ""; lastOutCallbacks = -1; lastCapCallbacks = -1; stalledTicks = 0
+            mode = .active; activatedOnce = true; lastFailure = ""; lastOutCallbacks = -1; lastCapCallbacks = -1; stalledTicks = 0
             let inMs = (cap?.latency ?? 0) * 1000, outMs = tv.latency * 1000
             log(String(format: "ACTIVE: %@ -> TrueHD 5.1 %d Hz -> MAT -> '%@'. Latency: capture %.1f + pipeline %.0f (+ encoder burst grouping, included) + TV output %.1f = %.0f ms, plus the soundbar's own decode delay",
                        src.map { "'\(CA.name($0))'" } ?? "test file", config.rate, CA.name(tvDev), inMs, config.targetMs, outMs, inMs + config.targetMs + outMs))
@@ -163,7 +168,7 @@ final class Bridge {
     private func watchHog(_ tv: AudioObjectID) {
         guard hogListenerDev != tv else { return }
         hogListener = PropertyListener(tv, addr(kAudioDevicePropertyHogMode)) { [weak self] in
-            guard let self, mode == .waiting, lastFailure.contains("hogged"),
+            guard let self, mode == .waiting, !asleep, lastFailure.contains("hogged"),
                   CA.i32(tv, kAudioDevicePropertyHogMode) == -1 else { return }
             log("TV released by the other app; taking it back")
             nextAttempt = .distantPast
@@ -196,15 +201,19 @@ final class Bridge {
 
     private func tick() {
         if getppid() != parentPID { log("supervisor is gone; exiting"); shutdown(); exit(0) }
+        if asleep { return }
         switch mode {
-        case .sleeping: return
         case .handedOff:
-            // Handed off at startup without a notification: Music may stop without sending one either (it was
-            // paused when we came up but still had its output running), so watch its output instead. Two quiet
-            // ticks in a row, to ride out the switch from the virtual device to the TV.
-            guard musicFromProbe else { return }
-            probeQuietTicks = CA.musicSendingAudio() ? 0 : probeQuietTicks + 1
-            if probeQuietTicks >= 2 { musicChanged("Stopped (no longer sending audio)") }
+            // Music announces pause and stop, but not quitting by crash or force quit, and when we handed off at
+            // startup it may have been paused with its output still running. So also watch Music itself: gone, or
+            // (after a startup hand-off) not sending audio, for 3 ticks in a row (rides out the switch of its output
+            // from the virtual device to the TV). Not "idle" after a notified hand-off: Music playing to AirPlay
+            // can look idle, and taking the TV back then would flap on every track change.
+            guard musicPlaying else { return }
+            let m = CA.musicOutputState()
+            let quiet = m == .notRunning || (musicFromProbe && m == .idle)
+            musicQuietTicks = quiet ? musicQuietTicks + 1 : 0
+            if musicQuietTicks >= 3 { musicChanged(m == .notRunning ? "Stopped (Music quit)" : "Stopped (no longer sending audio)") }
         case .waiting:
             if Date() >= nextAttempt { activate() }
         case .active:
@@ -255,7 +264,7 @@ final class Bridge {
         guard def == src || sys == src else { return }
         let tv = config.findTV(savedUID: SavedState.load()?.tvUID)
         let outs = CA.devices().filter { CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 && $0 != src && $0 != tv }
-        guard let fallback = outs.first(where: { CA.uid($0).hasPrefix("BuiltIn") }) ?? outs.first else { return }
+        guard let fallback = CA.builtInOutput() ?? outs.first else { return }
         log("macOS moved the output to '\(CA.name(src))' while Music holds the TV; using '\(CA.name(fallback))' instead (status \(CA.setDefaultOutput(fallback)))")
     }
 
@@ -270,23 +279,22 @@ final class Bridge {
 
     // MARK: Apple Music hand-off
 
-    private func musicChanged(_ state: String) {
+    private func musicChanged(_ state: String, fromProbe: Bool = false) {
         log("Music: \(state)")
         musicPlaying = state == "Playing"
-        musicFromProbe = false; probeQuietTicks = 0
+        musicFromProbe = fromProbe; musicQuietTicks = 0
         reclaim?.cancel(); reclaim = nil
         if musicPlaying {
             guard mode != .handedOff else { return }
             if mode == .active { deactivate("Apple Music is playing; handing the TV to Music") }
             mode = .handedOff
-            if config.manageDefaultOutput, let tv = config.findTV(savedUID: SavedState.load()?.tvUID) {
-                log("default output -> '\(CA.name(tv))' status \(CA.setDefaultOutput(tv))")
-            }
+            // Point the system output at the TV so Music follows it there, unless the user picked another output.
+            if let tv = config.findTV(savedUID: SavedState.load()?.tvUID) { Recovery.restoreDefaultOutput(config, tv: tv) }
         } else if mode == .handedOff {
             let w = DispatchWorkItem { [weak self] in
                 guard let self, !musicPlaying, mode == .handedOff else { return }
                 log("Music no longer playing; taking the TV back")
-                mode = .waiting; nextAttempt = .distantPast; tick()
+                mode = .waiting; nextAttempt = .distantPast; tick()  // while asleep, tick() waits for wake
             }
             reclaim = w
             DispatchQueue.main.asyncAfter(deadline: .now() + config.handoffDelay, execute: w)

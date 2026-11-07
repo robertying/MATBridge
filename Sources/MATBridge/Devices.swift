@@ -30,9 +30,8 @@ final class TVSender {
         if let owner = CA.i32(dev, kAudioDevicePropertyHogMode), owner != -1, owner != me {
             throw ConfigError("TV is hogged by pid \(owner)")
         }
-        // Remember the LPCM format to restore. If the TV is already on an encoded format (left over from a crash),
-        // keep whatever was saved before.
-        // If a previous run did not get to restore the TV (crash, kill -9), its saved original is still the truth.
+        // Remember the LPCM format to restore. If a previous run did not get to restore the TV (crash, kill -9: the
+        // state is still dirty, or the TV is still on an encoded format), the format saved then is still the truth.
         let current = CA.physicalFormat(stream)
         var state: SavedState
         if let s = SavedState.load(), s.tvUID == CA.uid(dev), s.dirty == true || current.mFormatID != kAudioFormatLinearPCM {

@@ -28,11 +28,16 @@ enum CA {
         guard AudioObjectGetPropertyData(o, &a, 0, nil, &size, &s) == noErr, let s else { return nil }
         return s.takeRetainedValue() as String
     }
-    /// True while Apple Music has audio output running (to any device). Core Audio's process objects need no permission.
-    static func musicSendingAudio() -> Bool {
-        ids(systemObject, addr(kAudioHardwarePropertyProcessObjectList)).contains {
-            string($0, kAudioProcessPropertyBundleID) == "com.apple.Music" && u32($0, kAudioProcessPropertyIsRunningOutput) == 1
-        }
+    enum MusicOutput { case notRunning, idle, sending }
+    /// Whether Apple Music is running and has audio output running (to any device). Core Audio's process objects need
+    /// no permission.
+    static func musicOutputState() -> MusicOutput {
+        let procs = ids(systemObject, addr(kAudioHardwarePropertyProcessObjectList)).filter { string($0, kAudioProcessPropertyBundleID) == "com.apple.Music" }
+        if procs.isEmpty { return .notRunning }
+        return procs.contains { u32($0, kAudioProcessPropertyIsRunningOutput) == 1 } ? .sending : .idle
+    }
+    static func builtInOutput() -> AudioObjectID? {
+        devices().first { uid($0).hasPrefix("BuiltIn") && channelCount($0, kAudioObjectPropertyScopeOutput) > 0 }
     }
     static func name(_ o: AudioObjectID) -> String { string(o, kAudioObjectPropertyName) ?? "?" }
     static func uid(_ o: AudioObjectID) -> String { string(o, kAudioDevicePropertyDeviceUID) ?? "" }
@@ -79,29 +84,24 @@ enum CA {
         return UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self)).reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
-    /// Finds a device by exact UID first, then by name substring. `scope` requires channels in that direction.
-    static func find(uid: String?, nameContains: String, scope: AudioObjectPropertyScope) -> AudioObjectID? {
-        let devs = devices().filter { channelCount($0, scope) > 0 }
-        if let uid, !uid.isEmpty, let d = devs.first(where: { CA.uid($0) == uid }) { return d }
-        return devs.first(where: { name($0).localizedCaseInsensitiveContains(nameContains) })
+    /// Finds a device by name substring. `scope` requires channels in that direction.
+    static func find(nameContains: String, scope: AudioObjectPropertyScope) -> AudioObjectID? {
+        devices().first { channelCount($0, scope) > 0 && name($0).localizedCaseInsensitiveContains(nameContains) }
     }
     static func device(uid: String) -> AudioObjectID? {
         devices().first { CA.uid($0) == uid }
     }
 
     static func defaultOutput() -> AudioObjectID? { u32(systemObject, kAudioHardwarePropertyDefaultOutputDevice) }
-    static func setDefaultOutput(_ d: AudioObjectID, alsoSystem: Bool = true) -> OSStatus {
+    /// Sets both the output and the system (alert) output.
+    static func setDefaultOutput(_ d: AudioObjectID) -> OSStatus {
         let s = setU32(systemObject, kAudioHardwarePropertyDefaultOutputDevice, d)
-        if alsoSystem { setU32(systemObject, kAudioHardwarePropertyDefaultSystemOutputDevice, d) }
+        setU32(systemObject, kAudioHardwarePropertyDefaultSystemOutputDevice, d)
         return s
     }
 
     static func physicalFormat(_ s: AudioStreamID) -> AudioStreamBasicDescription {
         var a = addr(kAudioStreamPropertyPhysicalFormat); var f = AudioStreamBasicDescription(); var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        AudioObjectGetPropertyData(s, &a, 0, nil, &size, &f); return f
-    }
-    static func virtualFormat(_ s: AudioStreamID) -> AudioStreamBasicDescription {
-        var a = addr(kAudioStreamPropertyVirtualFormat); var f = AudioStreamBasicDescription(); var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
         AudioObjectGetPropertyData(s, &a, 0, nil, &size, &f); return f
     }
     @discardableResult

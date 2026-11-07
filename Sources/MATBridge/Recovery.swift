@@ -62,9 +62,9 @@ enum Recovery {
     static func restoreDefaultOutput(_ config: Config, tv: AudioObjectID?) {
         guard config.manageDefaultOutput, let def = CA.defaultOutput() else { return }
         let src = Capture.findDevice()
-        let builtIn = CA.devices().first { CA.uid($0).hasPrefix("BuiltIn") && CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 }
+        let builtIn = CA.builtInOutput()
         guard let want = tv ?? builtIn, want != def, def == src || def == builtIn else { return }
-        log("recover: default output '\(CA.name(def))' -> '\(CA.name(want))' status \(CA.setDefaultOutput(want))")
+        log("default output '\(CA.name(def))' -> '\(CA.name(want))' status \(CA.setDefaultOutput(want))")
     }
 
     static func status(_ config: Config) {

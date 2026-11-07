@@ -78,11 +78,11 @@ apps ──► "MATBridge" virtual device (6 ch, the system output; reports the 
 
 Apple Music plays Dolby Atmos itself, as Dolby Digital Plus with Atmos, which beats anything MATBridge can do for music. So by default MATBridge steps aside while Music plays. Turn this off with `--no-music-handoff`.
 
-- **Music starts playing:** MATBridge releases the HDMI output and makes it the system output, so Music takes it.
+- **Music starts playing:** MATBridge releases the HDMI output and makes it the system output (unless you picked another output), so Music takes it.
 - **Music pauses or stops:** after `--handoff-delay` (default 0.5 s), MATBridge takes the output back. Music holds it for up to about 2 s after pausing, so MATBridge watches the output and takes it the moment Music lets go.
 - **Meanwhile:** other apps' audio goes to the Mac's built-in speakers, which is what macOS does on its own when another app holds the HDMI output exclusively.
 
-The hand-off follows Music's `com.apple.Music.playerInfo` notification. Music only sends it when its state changes, so when MATBridge starts it also checks whether Music already has audio running, and if so steps aside straight away. It also happens when Music plays to AirPlay, which isn't necessary. Tracks without Atmos go to the HDMI output as plain PCM, so on a Mac that scrambles multichannel PCM, multichannel non-Atmos tracks can come out on the wrong speakers; stereo is fine.
+The hand-off follows Music's `com.apple.Music.playerInfo` notification. Music only sends it when its state changes, so when MATBridge starts it also checks whether Music already has audio running, and if so steps aside straight away. If Music quits without saying so (a crash), MATBridge takes the output back within a few seconds. It also happens when Music plays to AirPlay, which isn't necessary. Tracks without Atmos go to the HDMI output as plain PCM, so on a Mac that scrambles multichannel PCM, multichannel non-Atmos tracks can come out on the wrong speakers; stereo is fine.
 
 ## Latency and lip sync
 
