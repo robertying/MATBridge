@@ -50,13 +50,13 @@ It's also useful without that bug if you want lossless 5.1 from every app, not j
    ```bash
    .build/release/MATBridge run
    ```
-6. Once it sounds right, start it automatically at login:
+6. Once it sounds right, install it as a background app that starts at login:
    ```bash
    scripts/install.sh
    ```
    Options are passed through, for example `scripts/install.sh --rate 192000`. The log is at `~/Library/Logs/MATBridge.log` and starts over once it passes 10 MB.
 
-   macOS then asks whether MATBridge may access the microphone. Click **Allow**: capturing from the virtual device counts as audio input, although MATBridge never opens a real microphone. If you have an Apple signing certificate, `install.sh` signs the binary with it so the permission survives updates.
+   macOS then asks whether MATBridge may access the microphone. Click **Allow**: capturing from the virtual device counts as audio input, although MATBridge never opens a real microphone. If you have an Apple signing certificate, `install.sh` signs the app with it so the permission survives updates. The app lives in `~/Library/Application Support/MATBridge/MATBridge.app` and appears as MATBridge in System Settings → General → Login Items.
 
 ## How it works
 
@@ -182,7 +182,7 @@ scripts/uninstall.sh
 sudo rm -rf /Library/Audio/Plug-Ins/HAL/MATBridge.driver && sudo killall coreaudiod
 ```
 
-The first removes the login item and the installed binary, and restores the HDMI output and the system output. The second removes the virtual device. The saved state and the log stay behind in `~/Library/Application Support/MATBridge` and `~/Library/Logs/MATBridge.log`; delete them if you like.
+The first removes the login item and the installed app, and restores the HDMI output and the system output. The second removes the virtual device. The saved state and the log stay behind in `~/Library/Application Support/MATBridge` and `~/Library/Logs/MATBridge.log`; delete them if you like.
 
 ## Tested setup
 

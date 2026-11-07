@@ -30,6 +30,7 @@ final class Pipeline: @unchecked Sendable {
     let dupedFrames = Atomic<Int64>(0)
     let correctionPPM = Atomic<Int64>(0)
     let avgLevelMicros = Atomic<Int64>(0)
+    let playing = Atomic<Bool>(false)      // false while (re)filling the buffer before playback; no drift control then
 
     // Output IOProc state (only touched on the TV's IO thread).
     private var burstPos = 0
@@ -93,12 +94,12 @@ final class Pipeline: @unchecked Sendable {
         let readable = thb_ring_readable(burstRing)
         if prefilling {
             burstLive = readable >= burstBytes && level >= targetFrames
-            if burstLive { prefilling = false }
+            if burstLive { prefilling = false; playing.store(true, ordering: .relaxed) }
             return
         }
         if readable < burstBytes {
             underruns.add(1, ordering: .relaxed)
-            prefilling = true; burstLive = false
+            prefilling = true; burstLive = false; playing.store(false, ordering: .relaxed)
             return
         }
         // Way too much buffered (e.g. after a stall): drop a whole burst rather than drift down for minutes.
@@ -195,7 +196,9 @@ final class EncoderThread: Thread, @unchecked Sendable {
                 let n = thb_ring_read(p.pcmRing, buf, chunk * frameBytes) / frameBytes
                 if n == 0 { break }
                 var frames = n
-                // Clock drift between the virtual device and the HDMI clock: drop or repeat single frames.
+                // Clock drift between the virtual device and the HDMI clock: drop or repeat single frames. Only once
+                // playback runs: while the buffer (re)fills, its level says nothing about drift.
+                if !p.playing.load(ordering: .relaxed) { acc = 0; ppm = 0; levelSum = 0; levelN = 0 }
                 acc += ppm * 1e-6 * Double(n)
                 if acc >= 1, frames > 1 { frames -= 1; acc -= 1; p.droppedFrames.add(1, ordering: .relaxed) }
                 else if acc <= -1 {
@@ -204,7 +207,7 @@ final class EncoderThread: Thread, @unchecked Sendable {
                 }
                 if thb_enc_push(enc, buf, Int32(frames)) < 0 { log("encoder: push failed"); return }
                 p.inFrames.add(Int64(frames), ordering: .relaxed)
-                levelSum += Double(p.level); levelN += 1
+                if p.playing.load(ordering: .relaxed) { levelSum += Double(p.level); levelN += 1 }
             }
             if Date().timeIntervalSince(lastAdjust) >= 0.5, levelN > 0 {
                 let avgMs = levelSum / levelN * 1000 / Double(p.rate)
