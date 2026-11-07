@@ -19,7 +19,7 @@ struct Config {
     var rate = 48000
     var targetMs = 70.0               // buffered audio between capture and the TV IOProc
     var musicHandoff = true
-    var handoffDelay = 0.5            // seconds after Music pauses/stops before taking the TV back
+    var handoffDelay = 0.5            // seconds after Music pauses/stops or releases the TV before taking it back
     var manageDefaultOutput = true
     var channelMap: [Int]? = nil      // source channel index for FL FR FC LFE SL SR
     var testFile: String? = nil       // raw s32le 6ch file instead of capture (loops)
@@ -33,7 +33,7 @@ struct Config {
     usage: MATBridge <command> [options]
       run        run the bridge (a supervisor that restarts the worker and cleans up after it)
       recover    restore the HDMI output: release hog, mixing on, original PCM format, system output -> it
-      status     show the HDMI output, virtual device and saved state
+      status     show the HDMI output, virtual device, shared mix and saved state
       devices    list audio devices (marks outputs that accept Dolby MAT)
 
     options:
@@ -43,7 +43,7 @@ struct Config {
       --rate HZ             48000 (default), 96000 or 192000
       --target-ms MS        pipeline buffer target (default 70)
       --no-music-handoff    keep the HDMI output even while Apple Music plays
-      --handoff-delay S     seconds to wait after Music pauses/stops (default 0.5)
+      --handoff-delay S     seconds to wait after Music pauses/stops or lets go of the TV (default 0.5)
       --no-default-output   never change the system default output device
       --channel-map a,b,c,d,e,f   source channel (0-based) for FL,FR,FC,LFE,SL,SR (default: from the
                             virtual device's speaker layout in Audio MIDI Setup)

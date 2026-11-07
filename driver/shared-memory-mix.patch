@@ -1,5 +1,5 @@
 diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
-index 6a060a5..a679195 100644
+index 6a060a5..5ae301d 100644
 --- a/BlackHole/BlackHole.c
 +++ b/BlackHole/BlackHole.c
 @@ -20,6 +20,12 @@
@@ -15,7 +15,7 @@ index 6a060a5..a679195 100644
  
  //==================================================================================================
  #pragma mark -
-@@ -346,6 +352,68 @@ static const UInt32                 kDevice_SampleRatesSize             = sizeof
+@@ -346,6 +352,73 @@ static const UInt32                 kDevice_SampleRatesSize             = sizeof
  #define                             kRing_Buffer_Frame_Size             ((65536 + kLatency_Frame_Size))
  static Float32*                     gRingBuffer = NULL;
  
@@ -33,7 +33,12 @@ index 6a060a5..a679195 100644
 +    if (fd >= 0)
 +    {
 +        struct stat st;
-+        if (fstat(fd, &st) != 0 || (size_t)st.st_size != bytes) { close(fd); fd = -1; shm_unlink(MATB_SHM_NAME); }
++        // Reuse only our own ring. One that another user created first (before this driver ever ran) would let
++        // that user write audio that MATBridge then plays; replace it, or give up if it can't be removed.
++        if (fstat(fd, &st) != 0 || (size_t)st.st_size != bytes || st.st_uid != geteuid() || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0)
++        {
++            close(fd); fd = -1; shm_unlink(MATB_SHM_NAME);
++        }
 +    }
 +    if (fd < 0)
 +    {
@@ -84,7 +89,7 @@ index 6a060a5..a679195 100644
  
  //==================================================================================================
  #pragma mark -
-@@ -4350,6 +4418,14 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
+@@ -4350,6 +4423,14 @@ static OSStatus	BlackHole_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
          gDevice_AnchorHostTime = mach_absolute_time();
          gDevice_PreviousTicks = 0;
          gRingBuffer = calloc(kRing_Buffer_Frame_Size * kNumber_Of_Channels, sizeof(Float32));
@@ -99,7 +104,7 @@ index 6a060a5..a679195 100644
      }
      
      
-@@ -4606,6 +4682,12 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
+@@ -4606,6 +4687,12 @@ static OSStatus	BlackHole_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
          memcpy(gRingBuffer + ringBufferFrameLocationStart * kNumber_Of_Channels, ioMainBuffer, firstPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
          memcpy(gRingBuffer, (Float32*)ioMainBuffer + firstPartFrameSize * kNumber_Of_Channels, secondPartFrameSize * kNumber_Of_Channels * sizeof(Float32));
          

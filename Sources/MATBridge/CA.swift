@@ -110,11 +110,14 @@ enum CA {
         return AudioObjectSetPropertyData(s, &a, 0, nil, UInt32(MemoryLayout<AudioStreamBasicDescription>.size), &f)
     }
     static func availablePhysicalFormats(_ s: AudioStreamID) -> [AudioStreamBasicDescription] {
+        availablePhysicalRanged(s).map(\.mFormat)
+    }
+    static func availablePhysicalRanged(_ s: AudioStreamID) -> [AudioStreamRangedDescription] {
         var a = addr(kAudioStreamPropertyAvailablePhysicalFormats); var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(s, &a, 0, nil, &size) == noErr else { return [] }
         var v = [AudioStreamRangedDescription](repeating: AudioStreamRangedDescription(), count: Int(size) / MemoryLayout<AudioStreamRangedDescription>.stride)
-        AudioObjectGetPropertyData(s, &a, 0, nil, &size, &v)
-        return v.map(\.mFormat)
+        guard AudioObjectGetPropertyData(s, &a, 0, nil, &size, &v) == noErr else { return [] }
+        return Array(v.prefix(Int(size) / MemoryLayout<AudioStreamRangedDescription>.stride))
     }
 
     /// The device's preferred speaker layout (what Audio MIDI Setup "Configure Speakers" sets), as one label per channel.

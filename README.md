@@ -1,16 +1,13 @@
 # MATBridge
 
-MATBridge sends **all of your Mac's audio** to an HDMI TV, receiver or soundbar as **lossless Dolby TrueHD 5.1**, packed in Dolby MAT. The audio is sent bit-exact, with the HDMI output used exclusively.
+MATBridge sends **all of your Mac's audio** to an HDMI TV, receiver or soundbar as **lossless Dolby TrueHD 5.1**, packed in Dolby MAT, and lets Apple Music send **Dolby Atmos** to the same device. It solves two problems that macOS has with HDMI audio:
 
-Apps play to a virtual 5.1 device called **MATBridge**. A background process encodes that audio live to TrueHD with FFmpeg and sends the encoded stream unchanged to the HDMI output. Your receiver or soundbar decodes it, the same way it decodes a TrueHD soundtrack from a Blu-ray player.
+1. **Scrambled multichannel PCM.** Some Macs send multichannel PCM over HDMI with the channels on the wrong speakers, often in a different order every time the HDMI audio link restarts. Bitstream formats (Dolby Digital, Dolby Digital Plus, TrueHD) arrive intact, because the receiver decodes them and puts each channel on the right speaker itself. MATBridge turns everything into a bitstream: apps play to a virtual 5.1 device, and a background process encodes that audio live to TrueHD and sends it bit-exact to the HDMI output.
+2. **No Dolby Atmos from Apple Music through USB-C hubs and adapters.** Many USB-C hubs make their HDMI port from DisplayPort. macOS then sees the TV as a DisplayPort device, and Apple Music only passes Dolby Atmos through to devices it sees as HDMI, so it decodes Atmos itself instead. MATBridge's virtual device reports itself as HDMI and lists the TV's Dolby formats, so Music passes Atmos through to the TV again. MATBridge steps aside for those tracks and takes the output back afterwards.
+
+It's also useful without either problem if you want lossless 5.1 from every app, not just the few players that can bitstream.
 
 > **Status: experimental.** It changes system audio settings and takes your HDMI output exclusively, but every change is undone when it stops or crashes, and `MATBridge recover` undoes it by hand. Please report what happens on your hardware.
-
-## Why
-
-Some Macs scramble **multichannel PCM** over HDMI: the channels come out on the wrong speakers, often in a different order every time the HDMI audio link restarts. **Bitstream** formats (Dolby Digital, Dolby Digital Plus, TrueHD) arrive intact, because the receiver decodes them and puts each channel on the right speaker itself. MATBridge makes everything a bitstream.
-
-It's also useful without that bug if you want lossless 5.1 from every app, not just a few players that can bitstream.
 
 ## Requirements
 
@@ -18,6 +15,7 @@ It's also useful without that bug if you want lossless 5.1 from every app, not j
 - **An HDMI output whose connected sink accepts Dolby MAT (TrueHD)**: a TV with eARC passthrough, an AV receiver, or a soundbar. Check with `MATBridge devices` after building; the right output is marked `accepts Dolby MAT (TrueHD)`. macOS only offers that format while a capable sink is connected and switched on.
 - **Homebrew FFmpeg** (provides the `truehd` encoder and `spdif` muxer): `brew install ffmpeg`.
 - **Xcode**. The Command Line Tools are enough to build MATBridge itself; building the virtual audio device needs full Xcode.
+- For the Apple Music Atmos hand-off: an admin account (to read Music's log without sudo) and Music's Dolby Atmos setting on Automatic or Always On.
 - Optional: an Apple code-signing certificate for the driver. A Developer ID is used if you have one, otherwise an Apple Development certificate, otherwise an ad-hoc signature.
 
 ## Quick start
@@ -67,22 +65,28 @@ apps ──► "MATBridge" virtual device (6 ch, the system output; reports the 
     speaker layout)        → libavformat "spdif" (MAT framing)    20 ms each)    2ch 16-bit 768 kHz, raw bytes)
 ```
 
-- **Capture.** The MATBridge driver copies every output mix it receives into a POSIX shared-memory ring, and MATBridge reads that ring from an IOProc on the device. The IOProc keeps the device running and wakes MATBridge once per ~5 ms IO cycle. Its input streams are switched off, so macOS does not treat MATBridge as recording: no microphone indicator, no permission prompt. [docs/design.md](docs/design.md) explains why, and compares the alternatives.
+- **Capture.** The MATBridge driver copies every output mix it receives into a POSIX shared-memory ring, and MATBridge reads that ring from an IOProc on the device. The IOProc keeps the device running and wakes MATBridge once per ~5 ms IO cycle. Its input streams are switched off, so macOS does not treat MATBridge as recording: no microphone indicator, no permission prompt. [docs/design.md](docs/design.md#getting-the-system-mix-to-matbridge) explains why, and compares the alternatives.
 - **Encoder.** FFmpeg's TrueHD encoder is linked directly, not run as the `ffmpeg` command. Piping through the command added 13–97 ms of uneven buffering; the library adds a fixed 15 ms. The output is byte-identical to `ffmpeg -c:a truehd -strict experimental -f spdif`. TrueHD stores 24 bits, so 24-bit audio passes through unchanged. Encoding runs about 140× faster than real time at 48 kHz (about 47× at 192 kHz).
 - **Sender.** The HDMI output is opened exclusively ("hog mode") with mixing off and the Dolby MAT format set, then fed raw bytes. When it stops, everything is put back. On an underrun the output gets a pre-encoded *silent* MAT burst instead of nothing, so the receiver stays locked rather than clicking while it re-syncs.
 - **Clock drift.** The virtual device and the HDMI output run on different clocks. The difference is absorbed by dropping or repeating single samples before encoding, under a proportional controller capped at ±1000 ppm. In practice that's a few hundred samples while it settles after start, then close to none. This is the only place samples are changed.
 - **Real-time.** The capture and output callbacks don't allocate memory or take locks. The encoder thread runs with real-time scheduling and joins the audio device's IO workgroup.
-- **Virtual device.** It's [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2, built with 6 channels and only 48, 96 and 192 kHz, plus two small patches: `driver/reported-output-latency.patch`, described under [Latency and lip sync](#latency-and-lip-sync), and `driver/shared-memory-mix.patch`, which publishes the mix for capture (layout in `Sources/CTrueHD/matbridge_shm.h`). Its speaker layout defaults to L R C LFE Ls Rs; MATBridge reads it and maps channels by speaker, not by number.
+- **Virtual device.** It's [BlackHole](https://github.com/ExistentialAudio/BlackHole) v0.7.2, built with 6 channels at 48, 96 and 192 kHz, plus three small patches: `driver/reported-output-latency.patch`, described under [Latency and lip sync](#latency-and-lip-sync); `driver/shared-memory-mix.patch`, which publishes the mix for capture (layout in `Sources/CTrueHD/matbridge_shm.h`); and `driver/hdmi-passthrough.patch`, which makes it report HDMI and list the TV's Dolby formats (see [Apple Music hand-off](#apple-music-hand-off)). Its speaker layout defaults to L R C LFE Ls Rs; MATBridge reads it and maps channels by speaker, not by number.
 
 ## Apple Music hand-off
 
-Apple Music plays Dolby Atmos itself, as Dolby Digital Plus with Atmos, which beats anything MATBridge can do for music. So by default MATBridge steps aside while Music plays. Turn this off with `--no-music-handoff`.
+Apple Music plays Dolby Atmos itself, as Dolby Digital Plus with Atmos, which beats the 5.1 MATBridge can make. So MATBridge lets Music have the HDMI output for Atmos tracks and keeps it for everything else. Turn this off with `--no-music-handoff`.
 
-- **Music starts playing:** MATBridge releases the HDMI output and makes it the system output (unless you picked another output), so Music takes it.
-- **Music pauses or stops:** after `--handoff-delay` (default 0.5 s), MATBridge takes the output back. Music holds it for up to about 2 s after pausing, so MATBridge watches the output and takes it the moment Music lets go.
-- **Meanwhile:** other apps' audio goes to the Mac's built-in speakers, which is what macOS does on its own when another app holds the HDMI output exclusively.
+- **Stereo and lossless tracks** play into the MATBridge device like any other app's audio. They reach the receiver as TrueHD 5.1, mixed with whatever else is playing.
+- **Atmos tracks.** Music's log says which audio format it is about to play: MATBridge reads it with `log stream`, filtered to one line per track. When the format is Dolby, MATBridge releases the HDMI output, and Music switches to passing Atmos through to it, usually within half a second. Music only reconsiders when the system output changes, so if releasing the output didn't make macOS change it, MATBridge switches the system output to the TV and straight back.
+- **Other apps meanwhile.** The system output stays on MATBridge. While Music holds the HDMI output, other apps play from the Mac's built-in speakers; in the moments the output is free, they go to it as stereo PCM.
+- **Taking it back.** When Music lets go of the HDMI output (it pauses or stops, or the next track has no Atmos), MATBridge takes it back after `--handoff-delay` (default 0.5 s), as soon as Music has really released it (up to about 2 s after a pause). From one Atmos track to the next, Music keeps the output, so nothing switches.
+- **If Music doesn't take the output** within 10 s of the release, MATBridge takes it back and ignores Dolby from Music for 30 s.
 
-The hand-off follows Music's `com.apple.Music.playerInfo` notification. Music only sends it when its state changes, so when MATBridge starts it also checks whether Music already has audio running, and if so steps aside straight away. If Music quits without saying so (a crash), MATBridge takes the output back within a few seconds. It also happens when Music plays to AirPlay, which isn't necessary. Tracks without Atmos go to the HDMI output as plain PCM, so on a Mac that scrambles multichannel PCM, multichannel non-Atmos tracks can come out on the wrong speakers; stereo is fine.
+**Through a USB-C hub.** Music only passes Dolby through when the *system output* is an HDMI device that lists Dolby formats, and the TV is free at that moment. Through hubs and adapters that convert DisplayPort to HDMI, macOS sees the TV as a DisplayPort device, so Music would decode Atmos itself. The MATBridge device reports HDMI and lists the formats the TV accepts (`driver/hdmi-passthrough.patch`), so Music passes Atmos through on either connection. It only lists them: Music still sends the Atmos stream to the TV directly. `MATBridge status` shows how macOS sees the TV (`hdmi` or `dprt`) and what the MATBridge device lists. [docs/design.md](docs/design.md#apple-music-passthrough) has the measurements.
+
+**Without an admin account** `log stream` isn't allowed. MATBridge logs that once and falls back to releasing the HDMI output whenever Music plays. Atmos still passes through, but stereo tracks and other apps then reach the receiver as stereo PCM during Music sessions.
+
+Music's `com.apple.Music.playerInfo` notification tells MATBridge when Music plays, pauses and stops. Music only sends it when its state changes, so at startup MATBridge also checks whether Music is already playing and holds the HDMI output. If Music quits without saying so (a crash), MATBridge takes the output back within a few seconds.
 
 ## Latency and lip sync
 
@@ -140,7 +144,7 @@ MATBridge <command> [options]
   --rate 48000|96000|192000        TrueHD sample rate (MAT runs at 768 kHz on the wire either way)
   --target-ms MS                   pipeline buffer (default 70)
   --no-music-handoff               keep the output while Apple Music plays
-  --handoff-delay S                wait after Music pauses before taking the output back (default 0.5)
+  --handoff-delay S                wait after Music pauses or lets go before taking the output back (default 0.5)
   --no-default-output              never change the system output
   --channel-map a,b,c,d,e,f        0-based source channels for FL FR FC LFE SL SR (default: from the speaker layout)
   --test-file PATH                 loop a raw s32le 6-channel file instead of capturing
@@ -152,6 +156,7 @@ MATBridge <command> [options]
 
 - **No output is marked "accepts Dolby MAT".** The sink must be on and support TrueHD/MAT passthrough. For a TV with eARC, enable passthrough or bitstream in the TV's sound settings. Some sinks only accept MAT over eARC, not plain ARC.
 - **The receiver shows PCM, or no sound.** Run `MATBridge status`, then `MATBridge recover`, and check the log.
+- **Apple Music plays Atmos tracks as 5.1 or stereo, not Atmos.** In Music → Settings → Playback, Dolby Atmos must be Automatic or Always On. Check that the log shows `Music audio queue: '…' (Dolby)` lines; without them, Music's log isn't readable (see [Apple Music hand-off](#apple-music-hand-off)). `MATBridge status` should list Dolby formats for Apple Music; if it says the driver doesn't support that, rebuild and reinstall the driver.
 - **It doesn't start after `brew upgrade ffmpeg`** (the log shows a dyld error). FFmpeg changed major version: rebuild with `swift build -c release`, then re-run `scripts/install.sh` if installed.
 - **Short gaps in the sound.** The log counts underruns. Try a larger `--target-ms`, then rebuild the driver with the new total.
 - **Channels on the wrong speakers.** Run the channel test from the quick start. If that's wrong too, open Audio MIDI Setup → MATBridge → Configure Speakers and check that channels 1–6 are L R C LFE Ls Rs. Leave the TV's own speaker setup alone.
@@ -162,10 +167,12 @@ When reporting a problem, include the output of `MATBridge devices` and `MATBrid
 ## Known limits
 
 - **5.1 only.** FFmpeg's TrueHD encoder supports up to 5.1. There's no 7.1 and no Atmos for system audio; macOS downmixes 7.1 to 5.1.
-- **48 kHz family only.** MAT runs at 768 kHz, so 44.1 kHz sources are resampled to 48 kHz by macOS.
+- **48 kHz family only.** MAT runs at 768 kHz, so 44.1 kHz sources are resampled to 48 kHz by macOS. That includes Apple Music's lossless and hi-res stereo tracks: Music on macOS never changes the output's sample rate, so they play at the device's 48 kHz.
+- **The Atmos hand-off reads Music's log text**, which Apple can change in any update. If it stops matching, Atmos tracks play as decoded 5.1 TrueHD instead of Atmos. Switching between TrueHD and Atmos also makes the receiver re-lock, which mutes it for a moment.
+- **The MATBridge device calls itself HDMI and lists Dolby formats**, so other apps may offer Dolby passthrough to it. Selecting one of those formats is refused, and they play PCM as usual.
 - **The encoder is marked experimental** in FFmpeg. It has seen far less use than Dolby's own encoder.
 - **No volume control in MATBridge.** Use your receiver's volume. If you move the MATBridge device's volume slider, samples are scaled before encoding.
-- **The shared mix is readable by any local process.** The driver runs as `_coreaudiod` and can't hand the ring to just your user, so any program on the Mac can read what plays through MATBridge. See [docs/design.md](docs/design.md).
+- **The shared mix is readable by any local process.** The driver runs as `_coreaudiod` and can't hand the ring to just your user, so any program on the Mac can read what plays through MATBridge. See [docs/design.md](docs/design.md#the-shared-mix).
 - **Fixed reported latency.** It's set when the driver is built, and doesn't include the receiver's decode time.
 - **Clock-drift correction drops or repeats single samples**, so those few samples aren't bit-exact. For a minute or two after a start, while the correction settles, this can be heard as faint ticks on a pure test tone; music masks it.
 - Hard crashes cause a ~2 s gap while the supervisor restarts the worker.
@@ -177,14 +184,14 @@ scripts/uninstall.sh
 ```
 
 ```bash
-sudo rm -rf /Library/Audio/Plug-Ins/HAL/MATBridge.driver && sudo killall coreaudiod
+sudo rm -rf /Library/Audio/Plug-Ins/HAL/MATBridge.driver && sudo killall AirPlayXPCHelper coreaudiod
 ```
 
 The first removes the login item and the installed app, and restores the HDMI output and the system output. The second removes the virtual device; its 1.5 MB shared-memory ring goes away at the next restart. The saved state and the log stay behind in `~/Library/Application Support/MATBridge` and `~/Library/Logs/MATBridge.log`; delete them if you like.
 
 ## Tested setup
 
-Mac Studio (M5 Max), macOS 27.2, built-in HDMI → LG TV with eARC → 5.1.2 soundbar, FFmpeg 9.0.2.
+Mac Studio (M5 Max), macOS 27.2, FFmpeg 9.0.2, LG TV with eARC → 5.1.2 soundbar. Connected both through the Mac's HDMI port and through a USB-C hub whose HDMI port is DisplayPort-based (a Synaptics converter; macOS reports the TV as DisplayPort). Apple Music Atmos passthrough was checked on the hub.
 
 ## Repository layout
 
@@ -193,8 +200,10 @@ LICENSE                  GPL-3.0
 Sources/CTrueHD/         C: lock-free ring buffer, TrueHD encoder + MAT burst assembly (libavcodec/libavformat),
                          IO-workgroup helper, reader for the driver's shared mix (matbridge_shm.h: the layout
                          shared with the driver)
-Sources/MATBridge/       Swift: CoreAudio helpers, capture, HDMI sender, pipeline, supervisor, Music hand-off, recovery
-docs/design.md           how the system mix reaches MATBridge, and the alternatives that were measured
+Sources/MATBridge/       Swift: CoreAudio helpers, capture, HDMI sender, pipeline, supervisor, Apple Music hand-off
+                         (Bridge, MusicLog, Router), recovery
+docs/design.md           how the system mix reaches MATBridge, how Apple Music's Atmos passthrough works, and the
+                         alternatives that were measured
 driver/                  patches for the virtual device (BlackHole v0.7.2 is downloaded at build time)
 scripts/                 build-driver, install-driver, install, uninstall, make-channel-test
 prototype/bitsend.swift  the original proof of concept: plays a pre-encoded IEC 61937 file bit-exact
@@ -208,4 +217,4 @@ prototype/bitsend.swift  the original proof of concept: plays a pre-encoded IEC 
 
 ## License
 
-MATBridge is licensed under the [GNU General Public License v3.0](LICENSE). The driver patch modifies BlackHole (GPL-3.0), and Homebrew's FFmpeg is a GPL build, so GPL-3.0 keeps everything compatible.
+MATBridge is licensed under the [GNU General Public License v3.0](LICENSE). The driver patches modify BlackHole (GPL-3.0), and Homebrew's FFmpeg is a GPL build, so GPL-3.0 keeps everything compatible.

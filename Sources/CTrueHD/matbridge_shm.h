@@ -34,4 +34,9 @@ typedef struct {
 
 #define MATB_SHM_BYTES(ch) (sizeof(matb_shm_header) + (size_t)MATB_SHM_FRAMES * (ch) * sizeof(float))
 
+// Custom property on the virtual device (driver/hdmi-passthrough.patch): the encoded formats the TV offers, as a
+// CFData of AudioStreamRangedDescription. The app copies them from the TV; the device lists them (it never plays
+// them) so that Apple Music, which only checks the default output, passes Dolby Atmos through to the TV.
+#define MATB_DOLBY_FORMATS_SELECTOR 0x6D626466u   // 'mbdf'
+
 #endif

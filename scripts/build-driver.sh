@@ -1,9 +1,12 @@
 #!/bin/zsh
 # Builds the "MATBridge" virtual audio device: BlackHole v0.7.2 (GPL-3.0, github.com/ExistentialAudio/BlackHole)
-# with 6 channels, 48/96/192 kHz only, and driver/reported-output-latency.patch, which makes the device tell apps
+# with 6 channels at 48/96/192 kHz (MATBridge runs it at its --rate, 48 kHz by default), and
+# driver/reported-output-latency.patch, which makes the device tell apps
 # how late its audio is actually heard (so video players delay the picture to match), without adding any delay,
-# and driver/shared-memory-mix.patch, which publishes the output mix in shared memory (Sources/CTrueHD/
-# matbridge_shm.h) so MATBridge never opens the device's input side (no microphone indicator or permission).
+# driver/shared-memory-mix.patch, which publishes the output mix in shared memory (Sources/CTrueHD/
+# matbridge_shm.h) so MATBridge never opens the device's input side (no microphone indicator or permission), and
+# driver/hdmi-passthrough.patch, which makes the device report HDMI and list the TV's Dolby formats (copied there by
+# MATBridge), so Apple Music passes Dolby Atmos through to the TV even when macOS sees the TV as DisplayPort.
 #
 # usage: scripts/build-driver.sh [latency-ms] [signing identity]
 #   latency-ms  what to report. Default 98 = capture 5 + pipeline (--target-ms) 70 + TV output 22.8, as MATBridge
@@ -16,6 +19,7 @@ cd "${0:A:h}/.."
 latency_ms=${1:-98}
 identity=${2:-}
 tag=v0.7.2
+commit=561d934c77a1fa64987e01ccabe890fed30e181f   # v0.7.2; the driver runs inside coreaudiod, so a moved tag must not slip in
 root=$PWD/driver/build
 src=$root/BlackHole
 
@@ -30,8 +34,10 @@ if [[ ! -d $src ]]; then
   git -c advice.detachedHead=false clone -q --branch $tag --depth 1 https://github.com/ExistentialAudio/BlackHole.git "$src"
 fi
 git -C "$src" reset -q --hard "$tag^{commit}"
+[[ $(git -C "$src" rev-parse HEAD) == $commit ]] || { echo "BlackHole $tag is not commit $commit; refusing to build"; exit 1; }
 git -C "$src" apply "$PWD/driver/reported-output-latency.patch"
 git -C "$src" apply "$PWD/driver/shared-memory-mix.patch"
+git -C "$src" apply "$PWD/driver/hdmi-passthrough.patch"
 
 latency_us=$(( latency_ms * 1000 ))
 bundle=io.ruiying.matbridge.driver

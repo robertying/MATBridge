@@ -1,0 +1,181 @@
+diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
+index 5ae301d..9a28310 100644
+--- a/BlackHole/BlackHole.c
++++ b/BlackHole/BlackHole.c
+@@ -358,6 +358,17 @@ static Float32*                     gRingBuffer = NULL;
+ // process. An existing object of the right size is reused, so a reader's mapping survives a coreaudiod restart.
+ static matb_shm_header*             gShm = NULL;
+ 
++// MATBridge: Apple Music only passes Dolby Atmos (and AC-3/E-AC-3) through as a bitstream when the default output
++// device is an HDMI device that lists the encoded formats. The default output is this device, so it reports HDMI
++// transport and lists exactly the encoded formats the TV offers right now. The MATBridge app copies them from the TV
++// into the custom property MATB_DOLBY_FORMATS_SELECTOR (a CFData of AudioStreamRangedDescription); with no TV, or a
++// TV without Dolby formats, the list is empty and Music decodes as usual. The formats are only listed: setting one
++// is refused, so this device never carries a bitstream (Music sends it to the TV itself).
++#define                             kMATB_MaxDolbyFormats               32
++static AudioStreamRangedDescription gMATB_DolbyFormats[kMATB_MaxDolbyFormats];
++static UInt32                       gMATB_DolbyFormatCount              = 0;
++#define                             kMATB_ChangeAction_DolbyFormats     100  // see BlackHole_SetDevicePropertyData
++
+ static void MATB_ShmMapIfNeeded(void)
+ {
+     if (gShm != NULL) { return; }
+@@ -2043,7 +2054,7 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
+ 			//	any 32 bit integer, but common values for this property are defined in
+ 			//	<CoreAudio/AudioHardwareBase.h>
+ 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioDevicePropertyTransportType for the box");
+-			*((UInt32*)outData) = kAudioDeviceTransportTypeVirtual;
++			*((UInt32*)outData) = kAudioDeviceTransportTypeHDMI;  // MATBridge: see gMATB_DolbyFormats
+ 			*outDataSize = sizeof(UInt32);
+ 			break;
+ 			
+@@ -2256,6 +2267,11 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver,
+ 	//	property in the BlackHole_GetDevicePropertyData() method.
+ 	switch(inAddress->mSelector)
+ 	{
++		case kAudioObjectPropertyCustomPropertyInfoList:
++		case MATB_DOLBY_FORMATS_SELECTOR:
++			theAnswer = inObjectID == kObjectID_Device;
++			break;
++
+ 		case kAudioObjectPropertyBaseClass:
+ 		case kAudioObjectPropertyClass:
+ 		case kAudioObjectPropertyOwner:
+@@ -2314,6 +2330,15 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
+ 	//	property in the BlackHole_GetDevicePropertyData() method.
+ 	switch(inAddress->mSelector)
+ 	{
++		case kAudioObjectPropertyCustomPropertyInfoList:
++			*outIsSettable = false;
++			break;
++
++		case MATB_DOLBY_FORMATS_SELECTOR:
++			FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareUnknownPropertyError, Done, "BlackHole_IsDevicePropertySettable: no Dolby formats on this device");
++			*outIsSettable = true;
++			break;
++
+ 		case kAudioObjectPropertyBaseClass:
+ 		case kAudioObjectPropertyClass:
+ 		case kAudioObjectPropertyOwner:
+@@ -2375,6 +2400,15 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
+ 	//	property in the BlackHole_GetDevicePropertyData() method.
+ 	switch(inAddress->mSelector)
+ 	{
++		case kAudioObjectPropertyCustomPropertyInfoList:
++			*outDataSize = inObjectID == kObjectID_Device ? sizeof(AudioServerPlugInCustomPropertyInfo) : 0;
++			break;
++
++		case MATB_DOLBY_FORMATS_SELECTOR:
++			FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareUnknownPropertyError, Done, "BlackHole_GetDevicePropertyDataSize: no Dolby formats on this device");
++			*outDataSize = sizeof(CFPropertyListRef);
++			break;
++
+ 		case kAudioObjectPropertyBaseClass:
+ 			*outDataSize = sizeof(AudioClassID);
+ 			break;
+@@ -2511,6 +2545,23 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
+ 	//	it is necessary to lock the state mutex.
+ 	switch(inAddress->mSelector)
+ 	{
++		case kAudioObjectPropertyCustomPropertyInfoList:
++			if (inObjectID != kObjectID_Device || inDataSize < sizeof(AudioServerPlugInCustomPropertyInfo)) { *outDataSize = 0; break; }
++			((AudioServerPlugInCustomPropertyInfo*)outData)->mSelector = MATB_DOLBY_FORMATS_SELECTOR;
++			((AudioServerPlugInCustomPropertyInfo*)outData)->mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFPropertyList;
++			((AudioServerPlugInCustomPropertyInfo*)outData)->mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
++			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
++			break;
++
++		case MATB_DOLBY_FORMATS_SELECTOR:
++			FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareUnknownPropertyError, Done, "BlackHole_GetDevicePropertyData: no Dolby formats on this device");
++			FailWithAction(inDataSize < sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the Dolby formats");
++			pthread_mutex_lock(&gPlugIn_StateMutex);
++			*((CFPropertyListRef*)outData) = CFDataCreate(NULL, (const UInt8*)gMATB_DolbyFormats, gMATB_DolbyFormatCount * sizeof(AudioStreamRangedDescription));
++			pthread_mutex_unlock(&gPlugIn_StateMutex);
++			*outDataSize = sizeof(CFPropertyListRef);
++			break;
++
+ 		case kAudioObjectPropertyBaseClass:
+ 			//	The base class for kAudioDeviceClassID is kAudioObjectClassID
+ 			FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyBaseClass for the device");
+@@ -2625,7 +2676,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
+ 			//	any 32 bit integer, but common values for this property are defined in
+ 			//	<CoreAudio/AudioHardwareBase.h>
+ 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyTransportType for the device");
+-			*((UInt32*)outData) = kAudioDeviceTransportTypeVirtual;
++			*((UInt32*)outData) = kAudioDeviceTransportTypeHDMI;  // MATBridge: see gMATB_DolbyFormats
+ 			*outDataSize = sizeof(UInt32);
+ 			break;
+ 
+@@ -2960,6 +3011,41 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
+ 	//	property in the BlackHole_GetDevicePropertyData() method.
+ 	switch(inAddress->mSelector)
+ 	{
++		case MATB_DOLBY_FORMATS_SELECTOR:
++		{
++			FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareUnknownPropertyError, Done, "BlackHole_SetDevicePropertyData: no Dolby formats on this device");
++			FailWithAction(inDataSize != sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: wrong size for the Dolby formats");
++			CFPropertyListRef theList = *((const CFPropertyListRef*)inData);
++			FailWithAction(theList == NULL || CFGetTypeID(theList) != CFDataGetTypeID(), theAnswer = kAudioHardwareIllegalOperationError, Done, "BlackHole_SetDevicePropertyData: the Dolby formats must be a CFData");
++			CFIndex theLength = CFDataGetLength((CFDataRef)theList);
++			FailWithAction(theLength % sizeof(AudioStreamRangedDescription) != 0, theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_SetDevicePropertyData: the Dolby formats are not AudioStreamRangedDescriptions");
++			const AudioStreamRangedDescription* theNew = (const AudioStreamRangedDescription*)CFDataGetBytePtr((CFDataRef)theList);
++			AudioStreamRangedDescription theKept[kMATB_MaxDolbyFormats];
++			UInt32 theCount = 0;
++			for (CFIndex i = 0; i < theLength / (CFIndex)sizeof(AudioStreamRangedDescription) && theCount < kMATB_MaxDolbyFormats; i++)
++			{
++				// Encoded formats only: what this device mixes and plays stays its own float LPCM.
++				if (theNew[i].mFormat.mFormatID != kAudioFormatLinearPCM && theNew[i].mFormat.mFormatID != 0) { theKept[theCount++] = theNew[i]; }
++			}
++			pthread_mutex_lock(&gPlugIn_StateMutex);
++			Boolean theChanged = theCount != gMATB_DolbyFormatCount || memcmp(theKept, gMATB_DolbyFormats, theCount * sizeof(AudioStreamRangedDescription)) != 0;
++			memcpy(gMATB_DolbyFormats, theKept, theCount * sizeof(AudioStreamRangedDescription));
++			gMATB_DolbyFormatCount = theCount;
++			pthread_mutex_unlock(&gPlugIn_StateMutex);
++			if (theChanged)
++			{
++				*outNumberPropertiesChanged = 1;
++				outChangedAddresses[0].mSelector = MATB_DOLBY_FORMATS_SELECTOR;
++				outChangedAddresses[0].mScope = kAudioObjectPropertyScopeGlobal;
++				outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
++				// The HAL caches a stream's format list and only re-reads it in a configuration change (a no-op
++				// action in BlackHole_PerformDeviceConfigurationChange; IO pauses briefly, and only when the TV's
++				// formats actually change).
++				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, kMATB_ChangeAction_DolbyFormats, NULL); });
++			}
++			break;
++		}
++
+ 		case kAudioDevicePropertyNominalSampleRate:
+ 			//	Changing the sample rate needs to be handled via the
+ 			//	RequestConfigChange/PerformConfigChange machinery.
+@@ -3144,6 +3230,12 @@ static OSStatus	BlackHole_GetStreamPropertyDataSize(AudioServerPlugInDriverRef i
+ 		case kAudioStreamPropertyAvailableVirtualFormats:
+ 		case kAudioStreamPropertyAvailablePhysicalFormats:
+ 			*outDataSize = kDevice_SampleRatesSize * sizeof(AudioStreamRangedDescription);
++			if (inObjectID == kObjectID_Stream_Output)
++			{
++				pthread_mutex_lock(&gPlugIn_StateMutex);
++				*outDataSize += gMATB_DolbyFormatCount * sizeof(AudioStreamRangedDescription);
++				pthread_mutex_unlock(&gPlugIn_StateMutex);
++			}
+ 			break;
+ 
+ 		default:
+@@ -3301,6 +3393,17 @@ static OSStatus	BlackHole_GetStreamPropertyData(AudioServerPlugInDriverRef inDri
+ 
+ 			//	report how much we wrote
+ 			*outDataSize = theNumberItemsToFetch * sizeof(AudioStreamRangedDescription);
++
++			//	MATBridge: then the TV's encoded formats (output only), as far as they fit
++			if (inObjectID == kObjectID_Stream_Output)
++			{
++				UInt32 theRoom = inDataSize / sizeof(AudioStreamRangedDescription) - theNumberItemsToFetch;
++				pthread_mutex_lock(&gPlugIn_StateMutex);
++				UInt32 theExtra = gMATB_DolbyFormatCount < theRoom ? gMATB_DolbyFormatCount : theRoom;
++				memcpy(((AudioStreamRangedDescription*)outData) + theNumberItemsToFetch, gMATB_DolbyFormats, theExtra * sizeof(AudioStreamRangedDescription));
++				pthread_mutex_unlock(&gPlugIn_StateMutex);
++				*outDataSize += theExtra * sizeof(AudioStreamRangedDescription);
++			}
+ 			break;
+ 
+ 		default:

@@ -252,6 +252,7 @@ void thb_wg_leave(void *handle) {
 // ---------------------------------------------------------------- shared-memory mix (driver -> app)
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -260,6 +261,7 @@ void thb_wg_leave(void *handle) {
 struct thb_shm {
     const matb_shm_header *h;
     size_t bytes;
+    uint64_t ch;       // channels, fixed at open: the mapping was size-checked for it
     uint64_t pos;      // next device sample time to read
     uint64_t epoch;
     int started;
@@ -275,6 +277,15 @@ thb_shm *thb_shm_open(char *err, int errlen) {
     }
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(matb_shm_header)) { close(fd); snprintf(err, errlen, "shared mix too small"); return NULL; }
+    // Only the driver may write the ring: it runs as _coreaudiod and creates it read-only for everyone else. A ring
+    // owned by anyone else, or writable by others, could feed MATBridge audio that no app played.
+    const struct passwd *pw = getpwnam("_coreaudiod");
+    if (!pw || st.st_uid != pw->pw_uid || (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        close(fd);
+        snprintf(err, errlen, "shared mix '%s' is not the driver's (owner uid %u, mode %o); not using it. Restart the Mac to clear it.", MATB_SHM_NAME, st.st_uid, st.st_mode & 0777);
+        errno = EPERM;
+        return NULL;
+    }
     void *p = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
     if (p == MAP_FAILED) { snprintf(err, errlen, "mmap: %s", strerror(errno)); return NULL; }
@@ -288,7 +299,7 @@ thb_shm *thb_shm_open(char *err, int errlen) {
     }
     thb_shm *s = calloc(1, sizeof(*s));
     if (!s) { munmap(p, (size_t)st.st_size); snprintf(err, errlen, "out of memory"); return NULL; }
-    s->h = h; s->bytes = (size_t)st.st_size;
+    s->h = h; s->bytes = (size_t)st.st_size; s->ch = h->channels;
     return s;
 }
 
@@ -298,13 +309,13 @@ void thb_shm_close(thb_shm *s) {
     free(s);
 }
 
-int thb_shm_channels(const thb_shm *s) { return (int)s->h->channels; }
+int thb_shm_channels(const thb_shm *s) { return (int)s->ch; }
 uint64_t thb_shm_rate(const thb_shm *s) { return atomic_load_explicit(&((matb_shm_header *)s->h)->sampleRateHz, memory_order_relaxed); }
 uint64_t thb_shm_writes(const thb_shm *s) { return atomic_load_explicit(&((matb_shm_header *)s->h)->writes, memory_order_relaxed); }
 
 int thb_shm_read(thb_shm *s, float *dst, int max_frames, int64_t *lost) {
     matb_shm_header *h = (matb_shm_header *)s->h;
-    const uint64_t cap = MATB_SHM_FRAMES, ch = h->channels;
+    const uint64_t cap = MATB_SHM_FRAMES, ch = s->ch;   // not h->channels: the mapping is only checked for s->ch
     uint64_t e = atomic_load_explicit(&h->epoch, memory_order_acquire);
     uint64_t w = atomic_load_explicit(&h->writeEnd, memory_order_acquire);
     if (!s->started || e != s->epoch || w < s->pos) {   // first read, or the device clock restarted: start from now

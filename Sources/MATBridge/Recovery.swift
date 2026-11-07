@@ -72,7 +72,8 @@ enum Recovery {
         if let tv = config.findTV(savedUID: saved?.tvUID),
            let stream = CA.streams(tv, kAudioObjectPropertyScopeOutput).first {
             let hog = CA.i32(tv, kAudioDevicePropertyHogMode) ?? -99
-            print("TV:      '\(CA.name(tv))' uid \(CA.uid(tv))")
+            let transport = CA.u32(tv, kAudioDevicePropertyTransportType).map(fourcc) ?? "?"
+            print("TV:      '\(CA.name(tv))' uid \(CA.uid(tv)), connection '\(transport)'\(transport == "dprt" ? " (DisplayPort: Apple Music only passes Dolby through via the MATBridge device)" : "")")
             print("         physical \(CA.describe(CA.physicalFormat(stream))), hog \(hog == -1 ? "none" : "pid \(hog)\(CA.pidAlive(hog) ? "" : " (dead)")"), mixing \(CA.u32(tv, kAudioDevicePropertySupportsMixing).map(String.init) ?? "n/a")")
             let lat = CA.u32(tv, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput) ?? 0
             let so = CA.u32(tv, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput) ?? 0
@@ -81,6 +82,7 @@ enum Recovery {
         if let src = Capture.findDevice() {
             let labels = CA.preferredChannelLabels(src, kAudioObjectPropertyScopeOutput)?.map(labelName).joined(separator: " ") ?? "unknown"
             print("Source:  '\(CA.name(src))' uid \(CA.uid(src)), \(Int(CA.f64(src, kAudioDevicePropertyNominalSampleRate) ?? 0)) Hz, speaker layout: \(labels)")
+            print("         Dolby formats listed for Apple Music: \(DolbyFormats.listed(src).map { $0.isEmpty ? "none (no TV, or MATBridge not running yet)" : $0.joined(separator: " ") } ?? "not supported by this driver build (rebuild it)")")
         } else { print("Source:  not found — is the MATBridge driver installed? (scripts/build-driver.sh, scripts/install-driver.sh)") }
         var err = [CChar](repeating: 0, count: 256)
         if let h = thb_shm_open(&err, 256) {
