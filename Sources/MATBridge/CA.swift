@@ -36,6 +36,12 @@ enum CA {
         if procs.isEmpty { return .notRunning }
         return procs.contains { u32($0, kAudioProcessPropertyIsRunningOutput) == 1 } ? .sending : .idle
     }
+    /// Process IDs of Apple Music's Core Audio clients.
+    static func musicPIDs() -> [Int32] {
+        ids(systemObject, addr(kAudioHardwarePropertyProcessObjectList))
+            .filter { string($0, kAudioProcessPropertyBundleID) == "com.apple.Music" }
+            .compactMap { i32($0, kAudioProcessPropertyPID) }
+    }
     static func builtInOutput() -> AudioObjectID? {
         devices().first { uid($0).hasPrefix("BuiltIn") && channelCount($0, kAudioObjectPropertyScopeOutput) > 0 }
     }
@@ -84,10 +90,6 @@ enum CA {
         return UnsafeMutableAudioBufferListPointer(raw.assumingMemoryBound(to: AudioBufferList.self)).reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
-    /// Finds a device by name substring. `scope` requires channels in that direction.
-    static func find(nameContains: String, scope: AudioObjectPropertyScope) -> AudioObjectID? {
-        devices().first { channelCount($0, scope) > 0 && name($0).localizedCaseInsensitiveContains(nameContains) }
-    }
     static func device(uid: String) -> AudioObjectID? {
         devices().first { CA.uid($0) == uid }
     }

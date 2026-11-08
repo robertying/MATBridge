@@ -33,6 +33,25 @@ final class MusicLog: @unchecked Sendable {   // all state on the main queue
         return s.contains("ac3") || s.contains("ec3") || s.contains("c-3") || s.contains("c+3") || s.contains("d+3") || s.contains("mtc") || s.hasPrefix("mt")
     }
 
+    /// The format of the most recent Music AudioQueue in the last few hours, or nil. Calls back on the main queue.
+    /// For a Music that was already playing when MATBridge started: its queue was built before `log stream` ran.
+    static func lastFormat(_ done: @escaping @Sendable (String?) -> Void) {
+        DispatchQueue.global().async {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+            p.arguments = ["show", "--last", "3h", "--style", "compact", "--predicate", predicate]
+            let out = Pipe()
+            p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            var f: String?
+            if (try? p.run()) != nil {
+                let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                p.waitUntilExit()
+                f = text.split(separator: "\n").reversed().lazy.compactMap { format(in: String($0)) }.first
+            }
+            DispatchQueue.main.async { done(f) }
+        }
+    }
+
     func start() {
         stopped = false
         launch()

@@ -87,6 +87,13 @@ final class Bridge {
             if CA.musicOutputState() == .sending {
                 log("Apple Music is already sending audio")
                 musicChanged("Playing", fromProbe: true)
+                // Its queue was built before we started watching: if that was Dolby (Atmos it decodes itself, e.g.
+                // because it started while the TV was held or seen as DisplayPort), hand over now, not at the next track.
+                MusicLog.lastFormat { [weak self] f in
+                    guard let self, let f, MusicLog.isDolby(f), CA.musicOutputState() == .sending else { return }
+                    log("Music's current audio queue is '\(f)'")
+                    musicFormat(f)
+                }
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
@@ -108,6 +115,13 @@ final class Bridge {
     private func activate() {
         guard let tvDev = findTV() else { return fail("no TV: \(config.tvDescription) not present") }
         watchHog(tvDev)
+        // Music already passing through (it took the TV before we did, e.g. while we restarted): that is a hand-off,
+        // so other apps get the router instead of silence until Music lets go.
+        if config.musicHandoff, testData == nil, let h = CA.i32(tvDev, kAudioDevicePropertyHogMode), h != -1, h != getpid(),
+           CA.musicPIDs().contains(h), CA.musicOutputState() == .sending {
+            musicPlaying = true; musicFromProbe = true; musicQuietTicks = 0
+            return handOff("Apple Music holds the TV (pid \(h)) and is playing; leaving it to Music")
+        }
         var src: AudioObjectID?
         var channels = config.channelMap ?? [0, 1, 2, 3, 4, 5]
         if testData == nil {

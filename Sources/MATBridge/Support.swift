@@ -89,17 +89,22 @@ struct Config {
 extension Config {
     /// The HDMI output to send MAT to: --tv-uid, else --tv name, else the one used last time, else the first output offering Dolby MAT
     /// ('mtct') at 768 kHz. That format is only offered while an HDMI/eARC sink that accepts it is connected.
+    /// Never the MATBridge virtual device: it lists the TV's Dolby formats too (for Apple Music), MAT included.
     func findTV(savedUID: String? = nil) -> AudioObjectID? {
         func output(_ uid: String?) -> AudioObjectID? {
-            uid.flatMap(CA.device(uid:)).flatMap { CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 ? $0 : nil }
+            guard let uid, uid != Capture.deviceUID, let d = CA.device(uid: uid) else { return nil }
+            return CA.channelCount(d, kAudioObjectPropertyScopeOutput) > 0 ? d : nil
         }
+        let candidates = CA.devices().filter { CA.uid($0) != Capture.deviceUID && CA.channelCount($0, kAudioObjectPropertyScopeOutput) > 0 }
         if let tvUID { return output(tvUID) }
-        if let n = tvName { return CA.find(nameContains: n, scope: kAudioObjectPropertyScopeOutput) }
+        if let n = tvName { return candidates.first { CA.name($0).localizedCaseInsensitiveContains(n) } }
         if let d = output(savedUID) { return d }  // the TV used last time, even while another app holds it
-        return CA.devices().first { d in
-            guard let s = CA.streams(d, kAudioObjectPropertyScopeOutput).first else { return false }
-            return CA.availablePhysicalFormats(s).contains { $0.mFormatID == TVSender.matFormat && $0.mSampleRate == 768000 }
-        }
+        return candidates.first(where: Self.acceptsMAT)
+    }
+
+    static func acceptsMAT(_ d: AudioObjectID) -> Bool {
+        guard let s = CA.streams(d, kAudioObjectPropertyScopeOutput).first else { return false }
+        return CA.availablePhysicalFormats(s).contains { $0.mFormatID == TVSender.matFormat && $0.mSampleRate == 768000 }
     }
     var tvDescription: String { tvName.map { "'\($0)'" } ?? "an HDMI output offering Dolby MAT" }
 }
