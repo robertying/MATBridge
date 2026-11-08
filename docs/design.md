@@ -195,11 +195,28 @@ not from the EDID, and the Core Audio transport stayed `'dprt'`.
   needs to reconsider. Keeping the virtual device as the default output is what keeps Music's transport check passing.
 - **Taking the TV back** needs no log: a listener on the TV's hog-mode property fires when Music lets go (a pause, or
   the next track has no Atmos), and MATBridge waits `--handoff-delay` so a release and re-take at a track change
-  doesn't make it flap. Measured on the hub: Atmos to stereo, the TV is back in about 0.4 s; stereo to Atmos or resume,
-  passthrough starts in about 0.4 s; Atmos to Atmos, nothing switches.
+  doesn't make it flap. Then it waits until something audible (above -80 dBFS) plays to the virtual device, read from
+  the driver's shared mix by a `SoundDetector`; writes alone don't count, since system sound services keep the device
+  running with silence. Each switch between Music's Dolby and MATBridge's TrueHD is an HDMI audio format change, which
+  the hub's converter shows as about a second of black screen; this way pausing and resuming an Atmos track switches
+  nothing. Music keeps the TV for about 3 s after pausing; if sound starts before it lets go, MATBridge takes the TV
+  the moment it does, and stops the router only after that, so other apps stay on the speakers during the switch.
+  Measured on the hub: Atmos to stereo, the TV is back in about 0.4 s; stereo to Atmos or resume, passthrough starts
+  in about 0.4 s; Atmos to Atmos, nothing switches.
+- **Releasing the TV puts it back to PCM first.** Released while still in the MAT format, Music took the TV but kept
+  decoding into the virtual device.
+- **When Music doesn't pass through.** After a release, or a decoding queue while handed off, the nudge and a 10 s
+  timer run until Music builds a passthrough queue (`'qc+3'`), not a decoding one (`'qec3'`, `'qac3'`): Music can
+  take the TV and still decode into the virtual device, so holding the TV doesn't count. After 10 s MATBridge takes
+  the TV back and ignores decoding queues for 30 s, so the fallback doesn't repeat.
+- **At startup**, Music may already be playing a queue built before `log stream` ran, so MATBridge reads Music's last
+  queue format with `log show --last 3h`. If Music holds the TV and is playing when MATBridge activates, that is a
+  hand-off too.
 - **Other apps during a hand-off** keep playing to the virtual device. The `Router` reads the driver's shared mix,
-  folds it to stereo and plays it with an output unit: to the Mac's built-in speakers while Music holds the TV, or to
-  the TV (at whatever format it is in; Core Audio converts the rate) in the moments it is free.
+  folds it to stereo and plays it with an output unit to the Mac's built-in speakers while Music holds the TV. In the
+  moment the TV passes between Music and MATBridge it plays nothing: sending it to the TV then would add an HDMI audio
+  format change, and some DisplayPort-to-HDMI converters blank the picture briefly at each one. (In the fallback
+  without the log, the TV stays free for Music's stereo tracks, and the router plays to it as stereo PCM.)
 
 ## Signals that were ruled out
 

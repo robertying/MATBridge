@@ -1,6 +1,7 @@
 // While MATBridge has released the TV for Apple Music's Dolby passthrough, whatever else plays to the virtual device
-// (other apps, and Music itself when it does not pass through) goes out as stereo PCM: to the TV while it is free
-// (at the TV's current format; Core Audio converts the rate), else (Music holds it) to the Mac's built-in speakers.
+// (other apps, and Music itself when it does not pass through) goes out as stereo PCM to the Mac's built-in speakers
+// while Music holds the TV. While the TV is free: nothing with the format watch (it is only free for a moment then),
+// else to the TV (at the TV's current format; Core Audio converts the rate).
 import AudioToolbox
 import CTrueHD
 import CoreAudio
@@ -67,9 +68,16 @@ final class Router: @unchecked Sendable {
     private var prefilling = true
     private var target = 0, window = 0
     let underruns = Atomic<Int64>(0), adjusted = Atomic<Int64>(0)
+    // Per destination, for the log: frames pulled from the shared mix, frames played, and of those, audible ones.
+    private let pulled = Atomic<Int64>(0), played = Atomic<Int64>(0), audible = Atomic<Int64>(0)
 
-    init(src: AudioObjectID, tv: AudioObjectID?, offsets: [Int]) throws {
-        self.src = src; self.tv = tv; self.offsets = offsets
+    /// False while MATBridge watches Music's log: then the TV is only free for a moment between Music and
+    /// MATBridge, and playing to it then would add an HDMI audio format change (which some DisplayPort-to-HDMI
+    /// converters show as a black screen). With the fallback (no log), the TV is free for Music's whole stereo tracks.
+    private let tvWhenFree: () -> Bool
+
+    init(src: AudioObjectID, tv: AudioObjectID?, offsets: [Int], tvWhenFree: @escaping () -> Bool) throws {
+        self.src = src; self.tv = tv; self.offsets = offsets; self.tvWhenFree = tvWhenFree
         var err = [CChar](repeating: 0, count: 256)
         guard let h = thb_shm_open(&err, 256) else { throw ConfigError("virtual device: \(String(cString: err))") }
         channels = Int(thb_shm_channels(h))
@@ -83,9 +91,12 @@ final class Router: @unchecked Sendable {
     }
     deinit { stop(); thb_ring_destroy(ring); floats.deallocate(); stereo.deallocate(); thb_shm_close(shm) }
 
-    /// Where the audio should go now: the TV while no other app holds it, else the built-in speakers.
+    /// Where the audio should go now: the TV while no other app holds it (or nowhere, see `tvWhenFree`), else the
+    /// built-in speakers.
     private func wantedDest() -> AudioObjectID? {
-        if let tv, CA.u32(tv, kAudioDevicePropertyDeviceIsAlive) == 1, CA.i32(tv, kAudioDevicePropertyHogMode) == -1 { return tv }
+        if let tv, CA.u32(tv, kAudioDevicePropertyDeviceIsAlive) == 1, CA.i32(tv, kAudioDevicePropertyHogMode) == -1 {
+            return tvWhenFree() ? tv : nil
+        }
         return CA.builtInOutput()
     }
 
@@ -93,16 +104,33 @@ final class Router: @unchecked Sendable {
     func check() {
         let want = wantedDest() ?? 0
         let r = CA.f64(src, kAudioDevicePropertyNominalSampleRate) ?? 48000
-        if want == dest, r == rate, unit != nil { return }
+        if want == dest, r == rate, unit != nil || want == 0 { return }
+        if let s = destStats() { log("router: \(s)") }
         stopUnit()
         dest = want; rate = r
-        guard want != 0 else { log("router: no output for other apps' sound"); return }
+        guard want != 0 else {
+            let tvFree = tv.flatMap { CA.i32($0, kAudioDevicePropertyHogMode) } == -1
+            log(tvFree ? "router: paused while the TV passes between Music and MATBridge" : "router: no output for other apps' sound")
+            return
+        }
         do { try startUnit(want, r) } catch { log("router: \(error)"); stopUnit() }
         let why = want == tv ? "" : tv.flatMap { CA.i32($0, kAudioDevicePropertyHogMode) }.map { " (the TV is held by pid \($0))" } ?? " (no TV)"
         log(String(format: "router: virtual device (%.1f kHz) -> '%@' as stereo%@", r / 1000, CA.name(want), why))
     }
 
-    func stop() { stopUnit(); dest = 0 }
+    /// Stops output. Returns what reached the last destination (see `destStats`).
+    @discardableResult func stop() -> String? {
+        let s = destStats(); stopUnit(); dest = 0
+        return s
+    }
+
+    /// What reached the current destination since it was chosen, and resets the counts. Nil without one.
+    private func destStats() -> String? {
+        guard dest != 0 else { return nil }
+        let r = rate > 0 ? rate : 48000
+        func ms(_ a: borrowing Atomic<Int64>) -> Int { Int(Double(a.exchange(0, ordering: .relaxed)) / r * 1000) }
+        return "to '\(CA.name(dest))': pulled \(ms(pulled)) ms, played \(ms(played)) ms, audible \(ms(audible)) ms"
+    }
 
     // MARK: output unit
 
@@ -148,6 +176,11 @@ final class Router: @unchecked Sendable {
     private func render(_ n: Int, _ io: UnsafeMutablePointer<AudioBufferList>?) {
         guard let io, let out = UnsafeMutableAudioBufferListPointer(io).first?.mData?.assumingMemoryBound(to: Float32.self) else { return }
         pull()
+        defer {
+            var loud = 0
+            for i in 0..<n where abs(out[2 * i]) > SoundDetector.threshold || abs(out[2 * i + 1]) > SoundDetector.threshold { loud += 1 }
+            if loud > 0 { audible.add(Int64(loud), ordering: .relaxed) }
+        }
         let level = thb_ring_readable(ring) / 8
         if prefilling {
             if level < target { out.update(repeating: 0, count: n * 2); return }
@@ -166,6 +199,7 @@ final class Router: @unchecked Sendable {
             adjusted.add(1, ordering: .relaxed); return
         }
         let got = thb_ring_read(ring, out, n * 8) / 8
+        played.add(Int64(got), ordering: .relaxed)
         if got < n { (out + got * 2).update(repeating: 0, count: (n - got) * 2) }
     }
 
@@ -177,6 +211,7 @@ final class Router: @unchecked Sendable {
         while true {
             let n = Int(thb_shm_read(shm, floats, Int32(scratchFrames), &lost))
             if n == 0 { break }
+            pulled.add(Int64(n), ordering: .relaxed)
             for i in 0..<n {
                 let f = floats + i * ch
                 let c = f[fc] * k
@@ -185,5 +220,37 @@ final class Router: @unchecked Sendable {
             }
             _ = thb_ring_write_all(ring, stereo, n * 8)  // full ring (output stopped): drop
         }
+    }
+}
+
+/// Tells whether anything audible plays to the virtual device: reads the driver's shared mix with its own reader.
+/// (Writes alone don't say so: system sound services keep the device's IO running with silence.)
+final class SoundDetector {
+    static let threshold: Float32 = 1e-4   // -80 dBFS
+    private let shm: OpaquePointer
+    private let frames = 4096
+    private let buf: UnsafeMutablePointer<Float32>
+    private let count: Int
+
+    init?() {
+        var err = [CChar](repeating: 0, count: 256)
+        guard let h = thb_shm_open(&err, 256) else { return nil }
+        shm = h
+        count = frames * Int(thb_shm_channels(h))
+        buf = .allocate(capacity: count)
+        var lost: Int64 = 0
+        _ = thb_shm_read(h, buf, Int32(frames), &lost)   // start from now
+    }
+    deinit { buf.deallocate(); thb_shm_close(shm) }
+
+    /// True if a sample above `threshold` arrived since the last call.
+    func heard() -> Bool {
+        var lost: Int64 = 0, loud = false
+        while true {
+            let n = Int(thb_shm_read(shm, buf, Int32(frames), &lost)) * count / frames
+            if n == 0 { break }
+            if !loud { for i in 0..<n where abs(buf[i]) > Self.threshold { loud = true; break } }
+        }
+        return loud
     }
 }

@@ -52,6 +52,11 @@ final class MusicLog: @unchecked Sendable {   // all state on the main queue
         }
     }
 
+    /// A Dolby queue that Music passes through to the TV ('qc+3'), not one it decodes itself ('qec3', 'qac3').
+    static func isPassthrough(_ f: String) -> Bool {
+        isDolby(f) && !["qec3", "qac3"].contains(f.lowercased())
+    }
+
     func start() {
         stopped = false
         launch()
