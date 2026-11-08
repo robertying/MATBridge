@@ -95,10 +95,10 @@ final class TVSender {
 
 /// Reads the system mix from the MATBridge virtual device.
 ///
-/// The driver copies every output mix it receives into a shared-memory ring (`matbridge_shm.h`). We run one IOProc on
-/// the device with its input streams switched off: it writes silence (which adds nothing to the mix), keeps the
-/// device's IO and clock running, and wakes us once per IO cycle to move the new frames into the pipeline. Because no
-/// input stream is ever used, macOS does not treat MATBridge as recording audio.
+/// The driver copies every output mix it receives into a shared-memory ring (`matbridge_shm.h`). We run one output-only
+/// IOProc on the device: it writes silence (which adds nothing to the mix), keeps the device's IO and clock running,
+/// and wakes us once per IO cycle to move the new frames into the pipeline. The device has no input side, so macOS
+/// does not treat MATBridge, or any app playing to it, as recording audio.
 final class Capture {
     let dev: AudioObjectID
     private let shm: OpaquePointer
@@ -186,7 +186,8 @@ final class Capture {
     }
 
     /// By default the HAL hands every IOProc the device's input streams too, and that alone counts as recording
-    /// (kAudioProcessPropertyIsRunningInput = 1, the orange indicator). Switch them all off for `proc`.
+    /// (kAudioProcessPropertyIsRunningInput = 1, the orange indicator). Switch them all off for `proc`. The device as
+    /// built has none; this only matters if a driver built with an input side is installed.
     private static func disableInputStreams(_ dev: AudioObjectID, _ proc: AudioDeviceIOProcID) -> OSStatus {
         var a = addr(kAudioDevicePropertyIOProcStreamUsage, kAudioObjectPropertyScopeInput)
         var size: UInt32 = 0

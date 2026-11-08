@@ -10,10 +10,10 @@ device's own clock. It must not count as recording: macOS treats any process run
 That means a permanent orange indicator in the menu bar and a Microphone permission prompt, both wrong for a program
 that never touches a microphone.
 
-**Design:** the driver publishes its output mix in shared memory, and MATBridge reads it from an IOProc on the device
-whose input streams are switched off. The pieces are `driver/shared-memory-mix.patch`,
-`Sources/CTrueHD/matbridge_shm.h` (the layout both sides share), `thb_shm_*` in `Sources/CTrueHD/ctruehd.c` and
-`Capture` in `Sources/MATBridge/Devices.swift`.
+**Design:** the device has no input side. The driver publishes its output mix in shared memory, and MATBridge reads
+it from an output-only IOProc on the device. The pieces are `driver/shared-memory-mix.patch`,
+`kDevice_HasInput=false` in `scripts/build-driver.sh`, `Sources/CTrueHD/matbridge_shm.h` (the layout both sides
+share), `thb_shm_*` in `Sources/CTrueHD/ctruehd.c` and `Capture` in `Sources/MATBridge/Devices.swift`.
 
 ## What counts as recording
 
@@ -26,6 +26,21 @@ it. An IOProc counts as input as soon as the HAL hands it the device's input str
 | Same, with `kAudioDevicePropertyIOProcStreamUsage` (input scope) all off | **0** | 1 |
 
 A loopback device read through its input side (the usual way to use BlackHole) therefore always shows the indicator.
+
+Having input streams at all is enough for the permission check. coreaudiod checks Microphone access
+(`kTCCServiceMicrophone`, a real request, not a preflight) for every app that starts IO on a device with input
+streams, even an output-only AUHAL that never reads input. An app with a usage string and no decision yet gets the
+macOS prompt, and its IO doesn't start until the prompt is answered. Apps without one, such as Music, are refused
+silently on every start. Measured with the unified log (`tccd`, `AUTHREQ_CTX ... preflight=no`):
+
+| Output IO started on | Microphone check | Prompt (no decision yet) |
+|---|---|---|
+| The device with BlackHole's input side: Chrome, AUHAL, plain IOProc, IOProc with input usage off | yes | yes (Chrome, AUHAL) |
+| Mac Studio Speakers: Chrome, plain IOProc | no | no |
+| The device built with `kDevice_HasInput=false`: Chrome, Music, AUHAL, plain IOProc | no | no |
+
+So the device is output-only. As a result it can't be used to record system audio, and macOS can no longer pick it
+as the default input when no microphone is attached.
 
 ## The shared mix
 
@@ -47,13 +62,17 @@ are allowed, while file writes outside its temp directory are not. So no `AudioS
 LaunchDaemon or other helper is needed. The ring is created with mode 0644, so MATBridge, an unprivileged per-user
 process, maps it read-only.
 
-**MATBridge.** One IOProc runs on the virtual device with its input streams switched off. It does three things:
+**MATBridge.** One output-only IOProc runs on the virtual device. It does three things:
 - writes silence, which adds nothing to the mix (x + 0 = x);
 - keeps the device's IO and clock running, so the mix is continuous even when nothing plays;
 - wakes once per device IO cycle (≈5 ms) and moves every new frame from the ring into the pipeline.
 
 The ring only exists once the device's IO has run. After a reboot or a coreaudiod restart that may not have happened
-yet, so `Capture` starts the same input-off IOProc for up to a second before it opens the ring.
+yet, so `Capture` starts the same kind of IOProc for up to a second before it opens the ring.
+
+Both IOProcs also switch off any input streams for themselves (`kAudioDevicePropertyIOProcStreamUsage`). The
+output-only device has none, so this does nothing there. It keeps MATBridge from counting as recording if a driver
+built with an input side is installed.
 
 **Properties.**
 - **Latency:** about one IO buffer. The driver publishes each mix for an output time about one buffer ahead, and
@@ -81,7 +100,6 @@ yet, so `Capture` starts the same input-off IOProc for up to a second before it 
   need a root LaunchDaemon brokering a mach memory-entry port, or a reader handshake through a custom device
   property. Both cost far more than they're worth on a single-user Mac.
 
-The device keeps BlackHole's loopback input; MATBridge doesn't use it.
 
 **Verification.**
 - **Reader:** a simulated writer (the driver's copy code, a test ring name) against `thb_shm_read` ran 288 000
