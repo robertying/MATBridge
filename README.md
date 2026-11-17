@@ -104,7 +104,7 @@ Measured at 48 kHz:
 
 Video players delay the picture by the latency the output device *reports*. Stock BlackHole reports 0, so the picture would run about 100 ms ahead of the sound. BlackHole's own latency setting doesn't help either: it also sets the "safety offset", which really delays the audio. `driver/reported-output-latency.patch` adds a latency that is only reported (output side, scaled to the current sample rate), so players hold the picture back by that much while nothing is actually delayed.
 
-The reported value is fixed when you build the driver: `scripts/build-driver.sh <ms>`, default 98. It's stored in microseconds and scaled to the sample rate, so `--rate` doesn't affect it. If you change `--target-ms`, rebuild the driver with the new total; MATBridge prints the breakdown when it starts. You can lower `--target-ms` at the risk of underruns, each of which is logged and heard as a short silent gap.
+The reported value is fixed when you build the driver: `scripts/build-driver.sh <ms>`, default 98. It's stored in microseconds and scaled to the sample rate, so `--rate` doesn't affect it. If you change `--target-ms` or `--codec` (with `ac3` the TV's own output latency is higher; about 57 ms instead of 23 ms on the tested setup), rebuild the driver with the new total; MATBridge prints the breakdown when it starts. You can lower `--target-ms` at the risk of underruns, each of which is logged and heard as a short silent gap.
 
 ## Reliability and recovery
 

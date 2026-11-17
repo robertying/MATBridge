@@ -262,15 +262,7 @@ final class SoundDetector {
     }
 
     /// True if a sample above `threshold` arrived since the last call.
-    func heard() -> Bool {
-        var lost: Int64 = 0, loud = false
-        while true {
-            let n = Int(thb_shm_read(shm, buf, Int32(frames), &lost)) * count / frames
-            if n == 0 { break }
-            if !loud { for i in 0..<n where abs(buf[i]) > Self.threshold { loud = true; break } }
-        }
-        return loud
-    }
+    func heard() -> Bool { measure().audible > 0 }
 }
 
 /// Peak and audible share of the mix between `take()` calls. Polls the shared mix 5 times a second: it only keeps a

@@ -229,7 +229,7 @@ final class Bridge {
         hogListenerDev = hogListener == nil ? 0 : tv
     }
 
-    /// The HDMI output: as configured, else the one used last time, else the first that accepts the chosen format (Dolby MAT, or AC-3).
+    /// The HDMI output: as configured, else the one used last time, else the first that accepts the codec's format.
     private func findTV() -> AudioObjectID? { config.findTV(savedUID: SavedState.load()?.tvUID) }
 
     private func fail(_ why: String) {
@@ -429,8 +429,8 @@ final class Bridge {
             takeBackWait = .tvFree
             return
         }
-        // Right after Music's Dolby, the TV is still settling its link to the soundbar: switched to TrueHD within a
-        // second of Music letting go, it kept sending the soundbar silent PCM 2.0 until the next format change.
+        // Right after Music's Dolby, the TV is still settling its link to the soundbar: switched to TrueHD about 0.8 s
+        // after Music let go, it kept sending the soundbar silent PCM 2.0 until the next format change.
         let settle = tvFreedByMusic.map { Self.tvSettleTime - Date().timeIntervalSince($0) } ?? 0
         tvFreedByMusic = nil
         if settle > 0 {
@@ -448,7 +448,7 @@ final class Bridge {
         if mode != .handedOff { stopRouter() }  // activating may have handed off again (Music took the TV meanwhile)
     }
 
-    /// How long after Music lets go of the TV to wait before switching it to TrueHD.
+    /// How long after Music lets go of the TV to wait before taking it back.
     static let tvSettleTime: TimeInterval = 1.5
 
     /// Music plays on with the TV: stay handed off.

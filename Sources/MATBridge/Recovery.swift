@@ -96,7 +96,7 @@ enum Recovery {
     static func listDevices() {
         for d in CA.devices() {
             let i = CA.channelCount(d, kAudioObjectPropertyScopeInput), o = CA.channelCount(d, kAudioObjectPropertyScopeOutput)
-            let note = CA.uid(d) == Capture.deviceUID ? "  <- MATBridge's virtual device" : Config.acceptsMAT(d) ? "  <- accepts Dolby MAT (TrueHD)" : ""
+            let note = CA.uid(d) == Capture.deviceUID ? "  <- MATBridge's virtual device" : Config.accepts(d, .truehd) ? "  <- accepts Dolby MAT (TrueHD)" : ""
             print(String(format: "%5d  in %2d  out %2d  ", d, i, o) + "\(CA.name(d))  [\(CA.uid(d))]\(note)")
         }
     }

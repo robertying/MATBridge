@@ -30,7 +30,7 @@ struct Config {
     var statsInterval = 60.0
 
     static let usage = """
-    MATBridge — system audio -> Dolby TrueHD 5.1 (MAT) -> HDMI, bit-exact, exclusive mode
+    MATBridge — system audio -> Dolby TrueHD 5.1 (MAT, bit-exact) or Dolby Digital 5.1 -> HDMI, exclusive mode
 
     usage: MATBridge <command> [options]
       run        run the bridge (a supervisor that restarts the worker and cleans up after it)
@@ -110,7 +110,6 @@ extension Config {
         return candidates.first { Self.accepts($0, codec) }
     }
 
-    static func acceptsMAT(_ d: AudioObjectID) -> Bool { accepts(d, .truehd) }
     static func accepts(_ d: AudioObjectID, _ codec: Codec) -> Bool {
         guard let s = CA.streams(d, kAudioObjectPropertyScopeOutput).first else { return false }
         return CA.availablePhysicalFormats(s).contains { $0.mFormatID == codec.formatID && $0.mSampleRate == codec.physicalRate }
