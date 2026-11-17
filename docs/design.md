@@ -45,7 +45,7 @@ as the default input when no microphone is attached.
 ## The shared mix
 
 **Driver.** The driver already receives the full system mix in `WriteMix`. It copies that buffer into a POSIX
-shared-memory ring, `/io.ruiying.matbridge`, applying the device's mute and volume. The ring holds 65 536 frames × 6
+shared-memory ring, `/io.ruiying.MATBridge`, applying the device's mute and volume. The ring holds 65 536 frames × 6
 channels of Float32, indexed by device sample time. Its header holds:
 - `writeEnd`, release-stored after the data;
 - an `epoch` that is bumped whenever the device clock restarts;

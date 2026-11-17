@@ -44,7 +44,7 @@ git -C "$src" apply "$PWD/driver/hdmi-passthrough.patch"
 cp "$PWD/driver/MATBridge.icns" "$src/BlackHole/BlackHole.icns"
 
 latency_us=$(( latency_ms * 1000 ))
-bundle=io.ruiying.matbridge.driver
+bundle=io.ruiying.MATBridge.driver
 rm -rf "$root/xcode"
 xcodebuild -quiet \
   -project "$src/BlackHole.xcodeproj" \

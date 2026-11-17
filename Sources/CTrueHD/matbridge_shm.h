@@ -13,7 +13,7 @@
 #include <stdint.h>
 
 #ifndef MATB_SHM_NAME
-#define MATB_SHM_NAME     "/io.ruiying.matbridge"   // POSIX shm names are limited to 31 characters on macOS
+#define MATB_SHM_NAME     "/io.ruiying.MATBridge"   // POSIX shm names are limited to 31 characters on macOS
 #endif
 #define MATB_SHM_MAGIC    0x4D415442u               // 'MATB'
 #define MATB_SHM_VERSION  1u

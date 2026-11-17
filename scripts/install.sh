@@ -6,7 +6,7 @@
 # Extra arguments are passed to `MATBridge run`, e.g.: scripts/install.sh --rate 192000
 set -euo pipefail
 cd "${0:A:h}/.."
-label=io.ruiying.matbridge
+label=io.ruiying.MATBridge
 support="$HOME/Library/Application Support/MATBridge"
 app="$support/MATBridge.app"
 bin="$app/Contents/MacOS/MATBridge"

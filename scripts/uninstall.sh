@@ -1,9 +1,9 @@
 #!/bin/zsh
 # Stops and removes the LaunchAgent, restores the TV and the default output, removes the installed app.
 # Leaves the MATBridge driver installed (remove it with: sudo rm -rf /Library/Audio/Plug-Ins/HAL/MATBridge.driver && sudo killall AirPlayXPCHelper coreaudiod).
-# The driver's shared-memory ring (/io.ruiying.matbridge, about 1.5 MB) stays until the next restart.
+# The driver's shared-memory ring (/io.ruiying.MATBridge, about 1.5 MB) stays until the next restart.
 set -uo pipefail
-label=io.ruiying.matbridge
+label=io.ruiying.MATBridge
 support="$HOME/Library/Application Support/MATBridge"
 app="$support/MATBridge.app"
 plist="$HOME/Library/LaunchAgents/$label.plist"
