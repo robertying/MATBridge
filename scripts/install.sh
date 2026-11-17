@@ -21,8 +21,9 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 launchctl bootout "gui/$UID/$label" 2>/dev/null || true
 for i in {1..50}; do launchctl print "gui/$UID/$label" >/dev/null 2>&1 || break; sleep 0.2; done
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp .build/release/MATBridge "$bin"
+cp driver/MATBridge.icns "$app/Contents/Resources/MATBridge.icns"   # icon/make-icon.sh regenerates it
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,6 +33,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleName</key><string>MATBridge</string>
   <key>CFBundleDisplayName</key><string>MATBridge</string>
   <key>CFBundleExecutable</key><string>MATBridge</string>
+  <key>CFBundleIconFile</key><string>MATBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
