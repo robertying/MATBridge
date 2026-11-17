@@ -82,6 +82,7 @@ struct thb_enc {
     AVFrame *frame;
     AVPacket *pkt;
     int frame_size, filled;
+    int burst_bytes;
     int64_t pts;
     thb_burst_fn cb;
     void *ctx;
@@ -103,10 +104,10 @@ static void assemble(thb_enc *e) {
             e->asm_len -= i;
             continue;
         }
-        if (e->asm_len < THB_MAT_BURST_BYTES) return;
-        e->cb(e->ctx, e->asm_buf, THB_MAT_BURST_BYTES);
-        memmove(e->asm_buf, e->asm_buf + THB_MAT_BURST_BYTES, e->asm_len - THB_MAT_BURST_BYTES);
-        e->asm_len -= THB_MAT_BURST_BYTES;
+        if (e->asm_len < e->burst_bytes) return;
+        e->cb(e->ctx, e->asm_buf, e->burst_bytes);
+        memmove(e->asm_buf, e->asm_buf + e->burst_bytes, e->asm_len - e->burst_bytes);
+        e->asm_len -= e->burst_bytes;
     }
 }
 
@@ -130,23 +131,28 @@ static void set_err(char *err, int errlen, const char *what, int ret) {
     snprintf(err, errlen, "%s%s%s", what, ret ? ": " : "", msg);
 }
 
-thb_enc *thb_enc_create(int rate, thb_burst_fn cb, void *ctx, char *err, int errlen) {
+thb_enc *thb_enc_create(thb_codec which, int rate, thb_burst_fn cb, void *ctx, char *err, int errlen) {
     av_log_set_level(AV_LOG_ERROR);
     thb_enc *e = calloc(1, sizeof(*e));
     if (!e) { set_err(err, errlen, "out of memory", 0); return NULL; }
     e->cb = cb; e->ctx = ctx;
     int ret;
 
-    const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_TRUEHD);
-    if (!codec) { set_err(err, errlen, "libavcodec has no truehd encoder", 0); goto fail; }
+    // "ac3_fixed" takes the same 32-bit integer planar input as "truehd".
+    const char *name = which == THB_CODEC_AC3 ? "ac3_fixed" : "truehd";
+    e->burst_bytes = which == THB_CODEC_AC3 ? THB_AC3_BURST_BYTES : THB_MAT_BURST_BYTES;
+    if (which == THB_CODEC_AC3 && rate != 48000) { set_err(err, errlen, "AC-3 runs at 48000 Hz only", 0); goto fail; }
+    const AVCodec *codec = avcodec_find_encoder_by_name(name);
+    if (!codec) { set_err(err, errlen, which == THB_CODEC_AC3 ? "libavcodec has no ac3_fixed encoder" : "libavcodec has no truehd encoder", 0); goto fail; }
     e->cc = avcodec_alloc_context3(codec);
     if (!e->cc) { set_err(err, errlen, "out of memory", 0); goto fail; }
     e->cc->sample_rate = rate;
     e->cc->sample_fmt = AV_SAMPLE_FMT_S32P;
-    e->cc->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+    if (which == THB_CODEC_AC3) e->cc->bit_rate = THB_AC3_BIT_RATE;
+    else e->cc->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
     e->cc->time_base = (AVRational){1, rate};
     av_channel_layout_from_mask(&e->cc->ch_layout, AV_CH_LAYOUT_5POINT1);  // 5.1(side)
-    if ((ret = avcodec_open2(e->cc, codec, NULL)) < 0) { set_err(err, errlen, "avcodec_open2(truehd)", ret); goto fail; }
+    if ((ret = avcodec_open2(e->cc, codec, NULL)) < 0) { set_err(err, errlen, which == THB_CODEC_AC3 ? "avcodec_open2(ac3_fixed)" : "avcodec_open2(truehd)", ret); goto fail; }
     e->frame_size = e->cc->frame_size;
 
     e->frame = av_frame_alloc();

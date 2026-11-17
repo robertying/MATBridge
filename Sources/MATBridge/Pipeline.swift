@@ -1,10 +1,9 @@
-// Capture (the driver's shared mix) -> PCM ring -> encoder thread (drift control, TrueHD/MAT) -> burst ring -> TV IOProc.
+// Capture (the driver's shared mix) -> PCM ring -> encoder thread (drift control, TrueHD/MAT or AC-3) -> burst ring -> TV IOProc.
 import CTrueHD
 import CoreAudio
 import Foundation
 import Synchronization
 
-let burstBytes = Int(THB_MAT_BURST_BYTES)
 let encChannels = Int(THB_CHANNELS)
 
 /// Float sample -> 32-bit integer, exact for 24-bit content. Clamps; NaN (a misbehaving app) becomes 0 instead of
@@ -15,11 +14,13 @@ let encChannels = Int(THB_CHANNELS)
 }
 
 final class Pipeline: @unchecked Sendable {
+    let codec: Codec
     let rate: Int
-    let bytesPerFrame: Int64      // MAT bytes per PCM frame (61440 bytes = 20 ms of audio)
+    let burstBytes: Int           // one IEC 61937 burst: 61440 bytes of MAT (20 ms), or 6144 bytes of AC-3 (32 ms)
+    let bytesPerFrame: Int64      // burst bytes per PCM frame
     let targetFrames: Int64
     let pcmRing: OpaquePointer    // interleaved int32 x6
-    let burstRing: OpaquePointer  // whole MAT bursts
+    let burstRing: OpaquePointer  // whole bursts
     let silence: UnsafeMutablePointer<UInt8>
     let wake = DispatchSemaphore(value: 0)
     var mute = false
@@ -45,14 +46,15 @@ final class Pipeline: @unchecked Sendable {
     private var burstLive = false
     private var prefilling = true
 
-    init(rate: Int, targetMs: Double) throws {
-        self.rate = rate
-        bytesPerFrame = Int64(burstBytes / (rate / 50))
+    init(codec: Codec, rate: Int, targetMs: Double) throws {
+        self.codec = codec; self.rate = rate
+        burstBytes = codec.burstBytes
+        bytesPerFrame = Int64(burstBytes / codec.burstFrames(rate: rate))
         targetFrames = Int64(targetMs * Double(rate) / 1000)
         pcmRing = thb_ring_create(rate * encChannels * 4)!            // 1 s
-        burstRing = thb_ring_create(burstBytes * 16)!                 // 320 ms
+        burstRing = thb_ring_create(burstBytes * 16)!                 // 320 ms of MAT, 512 ms of AC-3
         silence = .allocate(capacity: burstBytes)
-        try Pipeline.makeSilenceBurst(rate: rate, into: silence)
+        try Pipeline.makeSilenceBurst(codec: codec, rate: rate, into: silence)
     }
 
     deinit {
@@ -60,13 +62,13 @@ final class Pipeline: @unchecked Sendable {
     }
 
     /// Encodes a bit of digital silence and keeps one steady-state burst, used as filler on underrun so the
-    /// soundbar stays locked to MAT instead of seeing nothing.
-    static func makeSilenceBurst(rate: Int, into dst: UnsafeMutablePointer<UInt8>) throws {
+    /// soundbar stays locked to the format instead of seeing nothing.
+    static func makeSilenceBurst(codec: Codec, rate: Int, into dst: UnsafeMutablePointer<UInt8>) throws {
         final class Box { var count = 0; let dst: UnsafeMutablePointer<UInt8>; init(_ d: UnsafeMutablePointer<UInt8>) { dst = d } }
         let box = Box(dst)
         var err = [CChar](repeating: 0, count: 256)
         let ctx = Unmanaged.passUnretained(box).toOpaque()
-        guard let enc = thb_enc_create(Int32(rate), { ctx, burst, len in
+        guard let enc = thb_enc_create(codec.c, Int32(rate), { ctx, burst, len in
             let b = Unmanaged<Box>.fromOpaque(ctx!).takeUnretainedValue()
             b.dst.update(from: burst!, count: Int(len)); b.count += 1
         }, ctx, &err, 256) else { throw ConfigError("encoder: \(String(cString: err))") }
@@ -147,7 +149,7 @@ final class Pipeline: @unchecked Sendable {
     }
 }
 
-/// Encoder thread: pulls PCM, applies drift correction, encodes, pushes whole MAT bursts.
+/// Encoder thread: pulls PCM, applies drift correction, encodes, pushes whole bursts.
 final class EncoderThread: Thread, @unchecked Sendable {
     let p: Pipeline
     let testData: Data?   // loop this raw s32le 6ch file instead of reading captured PCM
@@ -160,7 +162,7 @@ final class EncoderThread: Thread, @unchecked Sendable {
         super.init()
         var err = [CChar](repeating: 0, count: 256)
         let ctx = Unmanaged.passUnretained(p).toOpaque()
-        enc = thb_enc_create(Int32(p.rate), { ctx, burst, len in
+        enc = thb_enc_create(p.codec.c, Int32(p.rate), { ctx, burst, len in
             let p = Unmanaged<Pipeline>.fromOpaque(ctx!).takeUnretainedValue()
             if thb_ring_write_all(p.burstRing, burst, Int(len)) == 0 {
                 p.burstOverflows.add(1, ordering: .relaxed)
@@ -168,7 +170,7 @@ final class EncoderThread: Thread, @unchecked Sendable {
             }
         }, ctx, &err, 256)
         guard enc != nil else { throw ConfigError("encoder: \(String(cString: err))") }
-        name = "truehd-encoder"
+        name = "\(p.codec.rawValue)-encoder"
         qualityOfService = .userInteractive
     }
 

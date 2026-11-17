@@ -1,4 +1,5 @@
 // Logging, configuration, persisted recovery state.
+import CTrueHD
 import CoreAudio
 import Foundation
 
@@ -16,6 +17,7 @@ func log(_ s: String) {
 struct Config {
     var tvName: String? = nil         // nil: auto-detect the output that offers Dolby MAT
     var tvUID: String? = nil
+    var codec = Codec.truehd
     var rate = 48000
     var targetMs = 70.0               // buffered audio between capture and the TV IOProc
     var musicHandoff = true
@@ -40,7 +42,9 @@ struct Config {
       --tv NAME             HDMI output name substring (default: the one used last time, else the first
                             output that accepts Dolby MAT)
       --tv-uid UID          HDMI output UID (takes precedence over --tv)
-      --rate HZ             48000 (default), 96000 or 192000
+      --codec C             truehd (default: lossless, in Dolby MAT) or ac3 (Dolby Digital 5.1 at 640 kb/s:
+                            lossy, but the format every Dolby decoder has handled for decades; 48 kHz only)
+      --rate HZ             48000 (default), 96000 or 192000 (TrueHD only)
       --target-ms MS        pipeline buffer target (default 70)
       --no-music-handoff    keep the HDMI output even while Apple Music plays
       --handoff-delay S     seconds to wait after Music pauses/stops or lets go of the TV (default 0.5)
@@ -63,6 +67,9 @@ struct Config {
             switch args[i] {
             case "--tv": c.tvName = try next()
             case "--tv-uid": c.tvUID = try next()
+            case "--codec":
+                guard let v = Codec(rawValue: try next()) else { throw ConfigError("--codec must be truehd or ac3") }
+                c.codec = v
             case "--rate":
                 guard let r = Int(try next()), [48000, 96000, 192000].contains(r) else { throw ConfigError("--rate must be 48000, 96000 or 192000 (the 48 kHz family; MAT runs at 768 kHz)") }
                 c.rate = r
@@ -82,6 +89,7 @@ struct Config {
             }
             i += 1
         }
+        if c.codec == .ac3, c.rate != 48000 { throw ConfigError("AC-3 runs at 48000 Hz only; drop --rate") }
         return c
     }
 }
@@ -99,14 +107,31 @@ extension Config {
         if let tvUID { return output(tvUID) }
         if let n = tvName { return candidates.first { CA.name($0).localizedCaseInsensitiveContains(n) } }
         if let d = output(savedUID) { return d }  // the TV used last time, even while another app holds it
-        return candidates.first(where: Self.acceptsMAT)
+        return candidates.first { Self.accepts($0, codec) }
     }
 
-    static func acceptsMAT(_ d: AudioObjectID) -> Bool {
+    static func acceptsMAT(_ d: AudioObjectID) -> Bool { accepts(d, .truehd) }
+    static func accepts(_ d: AudioObjectID, _ codec: Codec) -> Bool {
         guard let s = CA.streams(d, kAudioObjectPropertyScopeOutput).first else { return false }
-        return CA.availablePhysicalFormats(s).contains { $0.mFormatID == TVSender.matFormat && $0.mSampleRate == 768000 }
+        return CA.availablePhysicalFormats(s).contains { $0.mFormatID == codec.formatID && $0.mSampleRate == codec.physicalRate }
     }
-    var tvDescription: String { tvName.map { "'\($0)'" } ?? "an HDMI output offering Dolby MAT" }
+    var tvDescription: String { tvName.map { "'\($0)'" } ?? "an HDMI output offering \(codec.formatName)" }
+}
+
+/// What MATBridge encodes to. Both reach the TV as IEC 61937 bursts in a 2-channel 16-bit physical format.
+enum Codec: String {
+    case truehd, ac3
+
+    var c: thb_codec { self == .ac3 ? THB_CODEC_AC3 : THB_CODEC_TRUEHD }
+    /// The TV's physical format: Dolby MAT at 768 kHz, or IEC 60958 AC-3 at 48 kHz.
+    var formatID: AudioFormatID { self == .ac3 ? code("cac3") : code("mtct") }
+    var physicalRate: Double { self == .ac3 ? 48000 : 768000 }
+    var formatName: String { self == .ac3 ? "Dolby Digital ('cac3')" : "Dolby MAT ('mtct')" }
+    var burstBytes: Int { Int(self == .ac3 ? THB_AC3_BURST_BYTES : THB_MAT_BURST_BYTES) }
+    /// PCM frames per burst: one AC-3 frame, or 20 ms of MAT.
+    func burstFrames(rate: Int) -> Int { self == .ac3 ? Int(THB_AC3_BURST_FRAMES) : rate / 50 }
+    /// For the log: "TrueHD 5.1 48000 Hz -> MAT".
+    func describe(rate: Int) -> String { self == .ac3 ? "Dolby Digital 5.1 640 kb/s 48000 Hz" : "TrueHD 5.1 \(rate) Hz -> MAT" }
 }
 
 struct ConfigError: Error, CustomStringConvertible { let description: String; init(_ s: String) { description = s } }

@@ -190,6 +190,13 @@ not from the EDID, and the Core Audio transport stayed `'dprt'`.
   and reads `format:'xxxx'` from each line. (The predicate also requires the process to live in
   `/System/Applications/Music.app/`, so another program named "Music" can't trigger a hand-off.) These lines are public at the Default level, so an admin user can stream
   them without sudo. The line arrives when the queue is built, before the audio starts.
+- **The next track's queue comes early.** Music builds the queue for the next track while the current one still plays:
+  17 to 20 s before it ends with a 3 s crossfade (it logs "will not commit to gapless transition" for a format
+  change, so the tracks don't overlap). Releasing the TV then cut off the end of the current track: it kept playing
+  into the virtual device with nothing reading it. So a Dolby queue built more than 2 s after Music announced the
+  current track only arms the hand-off, and it happens at the next `com.apple.Music.playerInfo` "Playing" with a
+  different track (its `PersistentID`). Music then plays the start of the Atmos track decoded into the virtual
+  device for a moment, until the nudge makes it switch to passthrough. A queue in another format clears it.
 - **The nudge.** 150 ms after releasing the TV, if the default output hasn't moved, MATBridge sets it to the TV, and
   its default-output listener moves it straight back to the virtual device. That is the default-output change Music
   needs to reconsider. Keeping the virtual device as the default output is what keeps Music's transport check passing.
@@ -203,6 +210,10 @@ not from the EDID, and the Core Audio transport stayed `'dprt'`.
   the moment it does, and stops the router only after that, so other apps stay on the speakers during the switch.
   Measured on the hub: Atmos to stereo, the TV is back in about 0.4 s; stereo to Atmos or resume, passthrough starts
   in about 0.4 s; Atmos to Atmos, nothing switches.
+- **Settling after Music's Dolby.** Switching the TV to TrueHD about 0.8 s after Music let go of it left the TV
+  sending silent 2-channel PCM to the soundbar until the next format change; 1.5 s or more worked every time. So a
+  take-back within 1.5 s of Music letting go waits out the rest (`tvSettleTime`); other apps keep playing from the
+  speakers meanwhile.
 - **Releasing the TV puts it back to PCM first.** Released while still in the MAT format, Music took the TV but kept
   decoding into the virtual device.
 - **When Music doesn't pass through.** After a release, or a decoding queue while handed off, the nudge and a 10 s

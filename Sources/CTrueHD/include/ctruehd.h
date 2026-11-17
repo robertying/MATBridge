@@ -18,17 +18,24 @@ size_t thb_ring_read(thb_ring *r, void *dst, size_t len);
 // Drops up to `len` readable bytes (consumer side), returns how many were dropped.
 size_t thb_ring_skip(thb_ring *r, size_t len);
 
-// ---- TrueHD -> MAT encoder ----
+// ---- Encoder: TrueHD in MAT bursts, or Dolby Digital (AC-3) bursts, both IEC 61937 ----
 // Every IEC 61937 MAT burst is exactly this many bytes (15360 16-bit stereo frames at 768 kHz = 20 ms).
 #define THB_MAT_BURST_BYTES 61440
+// Every AC-3 burst: one 1536-sample AC-3 frame padded to 1536 16-bit stereo frames at 48 kHz (32 ms).
+#define THB_AC3_BURST_BYTES 6144
+#define THB_AC3_BURST_FRAMES 1536
+#define THB_AC3_BIT_RATE 640000  // the most AC-3 allows
 #define THB_CHANNELS 6  // FL FR FC LFE SL SR ("5.1(side)")
+
+typedef enum { THB_CODEC_TRUEHD = 0, THB_CODEC_AC3 = 1 } thb_codec;
 
 typedef void (*thb_burst_fn)(void *ctx, const uint8_t *burst, int len);
 typedef struct thb_enc thb_enc;
 
-// rate: 48000, 96000 or 192000. `cb` is called once per complete MAT burst, synchronously from
-// thb_enc_push. Returns NULL on failure with a message in `err`.
-thb_enc *thb_enc_create(int rate, thb_burst_fn cb, void *ctx, char *err, int errlen);
+// rate: 48000, 96000 or 192000 for TrueHD; 48000 for AC-3. `cb` is called once per complete burst
+// (THB_MAT_BURST_BYTES or THB_AC3_BURST_BYTES), synchronously from thb_enc_push. Returns NULL on failure with a
+// message in `err`.
+thb_enc *thb_enc_create(thb_codec codec, int rate, thb_burst_fn cb, void *ctx, char *err, int errlen);
 // `frames` frames of interleaved int32 samples in FL FR FC LFE SL SR order (TrueHD keeps the top 24 bits).
 // Returns 0 on success, a negative AVERROR on failure.
 int thb_enc_push(thb_enc *e, const int32_t *interleaved, int frames);

@@ -243,6 +243,24 @@ final class SoundDetector {
     }
     deinit { buf.deallocate(); thb_shm_close(shm) }
 
+    /// Since the last call: the largest sample magnitude, and how many frames arrived and how many were audible.
+    func measure() -> (peak: Float32, audible: Int, frames: Int) {
+        var lost: Int64 = 0, peak: Float32 = 0, audible = 0, total = 0
+        let ch = count / frames
+        while true {
+            let n = Int(thb_shm_read(shm, buf, Int32(frames), &lost))
+            if n == 0 { break }
+            total += n
+            for f in 0..<n {
+                var m: Float32 = 0
+                for c in 0..<ch { m = max(m, abs(buf[f * ch + c])) }
+                peak = max(peak, m)
+                if m > Self.threshold { audible += 1 }
+            }
+        }
+        return (peak, audible, total)
+    }
+
     /// True if a sample above `threshold` arrived since the last call.
     func heard() -> Bool {
         var lost: Int64 = 0, loud = false
@@ -252,5 +270,31 @@ final class SoundDetector {
             if !loud { for i in 0..<n where abs(buf[i]) > Self.threshold { loud = true; break } }
         }
         return loud
+    }
+}
+
+/// Peak and audible share of the mix between `take()` calls. Polls the shared mix 5 times a second: it only keeps a
+/// moment of audio, and a reader that falls further behind skips ahead and sees nothing.
+final class LevelMeter {
+    private let detector: SoundDetector
+    private var timer: Timer?
+    private var peak: Float32 = 0, audible = 0, frames = 0
+
+    init?() {
+        guard let d = SoundDetector() else { return nil }
+        detector = d
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.poll() }
+    }
+    deinit { timer?.invalidate() }
+
+    private func poll() {
+        let m = detector.measure()
+        peak = max(peak, m.peak); audible += m.audible; frames += m.frames
+    }
+
+    func take() -> (peak: Float32, audible: Int, frames: Int) {
+        poll()
+        defer { peak = 0; audible = 0; frames = 0 }
+        return (peak, audible, frames)
     }
 }

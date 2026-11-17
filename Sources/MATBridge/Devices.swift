@@ -3,7 +3,7 @@ import CTrueHD
 import CoreAudio
 import Foundation
 
-/// Takes the TV exclusively and streams MAT bursts to it. Generalized from prototype/bitsend.swift.
+/// Takes the TV exclusively and streams encoded bursts to it. Generalized from prototype/bitsend.swift.
 final class TVSender {
     let dev: AudioObjectID
     let stream: AudioStreamID
@@ -12,14 +12,12 @@ final class TVSender {
     private var procID: AudioDeviceIOProcID?
     private var tookHog = false, changedMixing = false, changedFormat = false
 
-    static let matFormat = code("mtct")
-
-    init(dev: AudioObjectID) throws {
+    init(dev: AudioObjectID, codec: Codec) throws {
         self.dev = dev
         guard let s = CA.streams(dev, kAudioObjectPropertyScopeOutput).first else { throw ConfigError("TV has no output stream") }
         stream = s
-        guard let t = CA.availablePhysicalFormats(s).first(where: { $0.mFormatID == TVSender.matFormat && $0.mSampleRate == 768000 }) else {
-            throw ConfigError("TV does not offer 'mtct' (Dolby MAT) at 768 kHz right now")
+        guard let t = CA.availablePhysicalFormats(s).first(where: { $0.mFormatID == codec.formatID && $0.mSampleRate == codec.physicalRate }) else {
+            throw ConfigError("TV does not offer \(codec.formatName) at \(Int(codec.physicalRate)) Hz right now")
         }
         target = t
         original = CA.physicalFormat(s)

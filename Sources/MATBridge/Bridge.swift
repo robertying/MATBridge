@@ -40,6 +40,11 @@ final class Bridge {
     private var defaultMoved = false      // macOS moved the default output since expectMusic()
     private var ignoreDolbyUntil = Date.distantPast  // Music didn't pass Dolby through last time: back off
     private var takeBackWait: TakeBackWait?  // Music is done with the TV, but MATBridge doesn't take it yet
+    private var musicTrack: String?       // Music's current track, from its last "Playing" announcement
+    private var musicPlayingSince = Date.distantPast  // that announcement
+    private var nextDolby: (format: String, after: String?)?  // Music prepared a Dolby queue for the track after `after`
+    private var tvFreedByMusic: Date?     // when Music last let go of the TV
+    private var statsLevel: LevelMeter?   // while active: how loud the mix was since the last stats line
     private var listeners: [PropertyListener] = []
     private var hogListener: PropertyListener?
     private var hogListenerDev: AudioObjectID = 0
@@ -88,7 +93,10 @@ final class Bridge {
             musicLog = ml
             ml.start()
             observers.append(DistributedNotificationCenter.default().addObserver(forName: Notification.Name("com.apple.Music.playerInfo"), object: nil, queue: .main) { [weak self] n in
-                self?.musicChanged(n.userInfo?["Player State"] as? String ?? "?")
+                let i = n.userInfo ?? [:]
+                let track = (i["PersistentID"]).map { "\($0)" }
+                    ?? [i["Name"], i["Artist"], i["Album"]].map { "\($0 ?? "")" }.joined(separator: "|")
+                self?.musicChanged(i["Player State"] as? String ?? "?", track: track)
             })
             // Music only announces changes, so one already playing when we start would otherwise lose the TV to us.
             if CA.musicOutputState() == .sending {
@@ -99,7 +107,7 @@ final class Bridge {
                 MusicLog.lastFormat { [weak self] f in
                     guard let self, let f, MusicLog.isDolby(f), CA.musicOutputState() == .sending else { return }
                     log("Music's current audio queue is '\(f)'")
-                    musicFormat(f)
+                    musicFormat(f, current: true)
                 }
             }
         }
@@ -145,11 +153,11 @@ final class Bridge {
             if config.channelMap == nil { channels = speakerMap(s) }
         }
         do {
-            let p = try Pipeline(rate: config.rate, targetMs: config.targetMs)
+            let p = try Pipeline(codec: config.codec, rate: config.rate, targetMs: config.targetMs)
             p.mute = config.mute
             var cap: Capture?
             if let src { cap = try Capture(dev: src, channels: channels); capture = cap }  // validates before the TV is touched
-            let tv = try TVSender(dev: tvDev)
+            let tv = try TVSender(dev: tvDev, codec: config.codec)
             sender = tv
             try tv.acquire(pipeline: p)
             let enc = try EncoderThread(p, testData: testData)
@@ -168,9 +176,10 @@ final class Bridge {
                 }
             }
             mode = .active; activatedOnce = true; lastFailure = ""; lastOutCallbacks = -1; lastCapCallbacks = -1; stalledTicks = 0
+            if testData == nil { statsLevel = LevelMeter() }
             let inMs = (cap?.latency ?? 0) * 1000, outMs = tv.latency * 1000
-            log(String(format: "ACTIVE: %@ -> TrueHD 5.1 %d Hz -> MAT -> '%@'. Latency: capture %.1f + pipeline %.0f (+ encoder burst grouping, included) + TV output %.1f = %.0f ms, plus the soundbar's own decode delay",
-                       src.map { "'\(CA.name($0))'" } ?? "test file", config.rate, CA.name(tvDev), inMs, config.targetMs, outMs, inMs + config.targetMs + outMs))
+            log(String(format: "ACTIVE: %@ -> %@ -> '%@'. Latency: capture %.1f + pipeline %.0f (+ encoder burst grouping, included) + TV output %.1f = %.0f ms, plus the soundbar's own decode delay",
+                       src.map { "'\(CA.name($0))'" } ?? "test file", config.codec.describe(rate: config.rate), CA.name(tvDev), inMs, config.targetMs, outMs, inMs + config.targetMs + outMs))
             if let src {
                 let rep = (Double(CA.u32(src, kAudioDevicePropertyLatency, kAudioObjectPropertyScopeOutput) ?? 0)
                     + Double(CA.u32(src, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput) ?? 0)) / Double(config.rate) * 1000
@@ -220,7 +229,7 @@ final class Bridge {
         hogListenerDev = hogListener == nil ? 0 : tv
     }
 
-    /// The HDMI output: as configured, else the one used last time, else the first that accepts Dolby MAT.
+    /// The HDMI output: as configured, else the one used last time, else the first that accepts the chosen format (Dolby MAT, or AC-3).
     private func findTV() -> AudioObjectID? { config.findTV(savedUID: SavedState.load()?.tvUID) }
 
     private func fail(_ why: String) {
@@ -233,6 +242,7 @@ final class Bridge {
         encoder?.stop(); encoder = nil
         sender?.release(); sender = nil
         pipeline = nil
+        statsLevel = nil
     }
 
     private func deactivate(_ why: String) {
@@ -334,7 +344,13 @@ final class Bridge {
         lastStats = Date()
         guard let p = pipeline else { return }
         func l(_ a: borrowing Atomic<Int64>) -> Int64 { a.load(ordering: .relaxed) }
-        log(String(format: "stats: buffer avg %.1f ms (target %.0f), drift corr %lld ppm, dropped %lld / repeated %lld frames, underruns %lld, burst skips %lld, overflows pcm %lld burst %lld, shared-mix frames lost %lld",
+        // How loud the sound sent to the TV was: says whether a silence was in the music or after MATBridge.
+        var level = ""
+        if let m = statsLevel?.take() {
+            level = m.frames == 0 ? "sound none, " : String(format: "sound peak %@, audible %.0f%%, ",
+                m.peak > 0 ? String(format: "%.0f dBFS", 20 * log10(m.peak)) : "silent", 100 * Double(m.audible) / Double(m.frames))
+        }
+        log("stats: " + level + String(format: "buffer avg %.1f ms (target %.0f), drift corr %lld ppm, dropped %lld / repeated %lld frames, underruns %lld, burst skips %lld, overflows pcm %lld burst %lld, shared-mix frames lost %lld",
                    Double(l(p.avgLevelMicros)) / 1000, config.targetMs, l(p.correctionPPM), l(p.droppedFrames), l(p.dupedFrames),
                    l(p.underruns), l(p.skips), l(p.pcmOverflows), l(p.burstOverflows), l(p.mixLost)))
     }
@@ -372,7 +388,7 @@ final class Bridge {
     /// sends to the Mac's speakers while Music holds the TV (see Router for while it is free).
     private func handOff(_ why: String) {
         cancelTakeBack()
-        // deactivate() puts the TV back to PCM before releasing it. Released still in MAT, Music took the TV but kept
+        // deactivate() puts the TV back to PCM before releasing it. Released still in MAT or AC-3, Music took the TV but kept
         // decoding into the virtual device.
         if mode == .active { deactivate(why) } else { log(why) }
         mode = .handedOff
@@ -413,10 +429,27 @@ final class Bridge {
             takeBackWait = .tvFree
             return
         }
+        // Right after Music's Dolby, the TV is still settling its link to the soundbar: switched to TrueHD within a
+        // second of Music letting go, it kept sending the soundbar silent PCM 2.0 until the next format change.
+        let settle = tvFreedByMusic.map { Self.tvSettleTime - Date().timeIntervalSince($0) } ?? 0
+        tvFreedByMusic = nil
+        if settle > 0 {
+            log("\(why) in \(String(format: "%.1f", settle)) s, once the TV has settled after Music's Dolby")
+            mode = .waiting; nextAttempt = Date().addingTimeInterval(settle)
+            DispatchQueue.main.asyncAfter(deadline: .now() + settle) { [weak self] in
+                guard let self, mode == .waiting else { return }
+                nextAttempt = .distantPast; tick()
+                if mode != .handedOff { stopRouter() }
+            }
+            return
+        }
         log(why)
         mode = .waiting; nextAttempt = .distantPast; tick()  // while asleep, tick() waits for wake
         if mode != .handedOff { stopRouter() }  // activating may have handed off again (Music took the TV meanwhile)
     }
+
+    /// How long after Music lets go of the TV to wait before switching it to TrueHD.
+    static let tvSettleTime: TimeInterval = 1.5
 
     /// Music plays on with the TV: stay handed off.
     private func cancelTakeBack() {
@@ -454,12 +487,12 @@ final class Bridge {
             if musicPlaying { cancelTakeBack() }
             router?.check()
         } else if waitingForTVFree {
-            musicHeldTV = false
+            musicHeldTV = false; tvFreedByMusic = Date()
             reclaimNow("Music let go of the TV; taking it back")
         } else if watchingFormats, musicHeldTV {
             // Music let go: a pause (also announced), or the next track has no Atmos and plays into the virtual
             // device. Wait out the hand-off delay so a quick release and re-take on a track change doesn't flap.
-            musicHeldTV = false
+            musicHeldTV = false; tvFreedByMusic = Date()
             scheduleTakeBack("TV released by Music; taking it back", hog: true) { CA.i32(tv, kAudioDevicePropertyHogMode) == -1 }
         } else if reclaim == nil {
             router?.check()
@@ -467,10 +500,19 @@ final class Bridge {
     }
 
     /// Music built an AudioQueue. Dolby while we hold the TV: hand the TV over, and Music switches to passthrough.
-    private func musicFormat(_ f: String) {
+    /// `current`: the queue is the one playing now (read back at startup), not one just built.
+    private func musicFormat(_ f: String, current: Bool = false) {
         let dolby = MusicLog.isDolby(f)
         log("Music audio queue: '\(f)'\(dolby ? " (Dolby)" : "")")
-        guard dolby, musicPlaying else { return }  // Music rebuilds its queue for a moment after pausing
+        if !dolby {
+            nextDolby = nil  // e.g. resuming or skipping to a track without Atmos
+            // Released the TV for a track that turned out to have no Atmos (skipped away from it): take the TV back.
+            if mode == .handedOff, awaitingMusicSince != nil, !musicHeldTV, musicPlaying {
+                takeBack("Music is playing '\(f)', not Dolby; taking the TV back")
+            }
+            return
+        }
+        guard musicPlaying else { return }  // Music rebuilds its queue for a moment after pausing
         let passthrough = MusicLog.isPassthrough(f)
         if passthrough { awaitingMusicSince = nil }
         let backingOff = Date() < ignoreDolbyUntil
@@ -485,6 +527,14 @@ final class Bridge {
             return
         }
         if backingOff { log("not releasing the TV: Music didn't pass Dolby through last time"); return }
+        // Built well after Music announced the track: it is preparing the next one, which can be 20 s before this one
+        // ends (more with crossfade). Releasing now would cut off the end of this track: wait for the track change.
+        if !current, Date().timeIntervalSince(musicPlayingSince) > 2 {
+            if nextDolby == nil { log("Music is preparing the next track in Dolby; handing the TV over when it starts") }
+            nextDolby = (f, musicTrack)
+            return
+        }
+        nextDolby = nil
         handOff("Apple Music is starting Dolby ('\(f)'); handing the TV to Music")
         expectMusic()
     }
@@ -504,10 +554,25 @@ final class Bridge {
         }
     }
 
-    private func musicChanged(_ state: String, fromProbe: Bool = false) {
+    private func musicChanged(_ state: String, track: String? = nil, fromProbe: Bool = false) {
         log("Music: \(state)")
         musicPlaying = state == "Playing"
         musicFromProbe = fromProbe; musicQuietTicks = 0
+        if musicPlaying {
+            let changed = track != nil && track != musicTrack
+            if track != nil { musicTrack = track }
+            musicPlayingSince = Date()
+            // The prepared Dolby track starts (a resume of the same track doesn't count).
+            if changed, let next = nextDolby, next.after != track {
+                nextDolby = nil
+                if mode != .handedOff {
+                    cancelTakeBack()
+                    handOff("Apple Music started the Dolby track ('\(next.format)'); handing the TV to Music")
+                    expectMusic()
+                    return
+                }
+            }
+        }
         // A track change announces "Stopped"/"Playing" around Music letting go of the TV for a stereo track: keep the
         // take-back that the release scheduled (it checks the TV is still free when it fires).
         if !hogReclaim { reclaim?.cancel(); reclaim = nil }
