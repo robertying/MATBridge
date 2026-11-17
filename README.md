@@ -1,4 +1,4 @@
-<img src="icon/matbridge.svg" alt="MATBridge icon" width="128" align="right">
+<img src="icon/matbridge.svg" alt="MATBridge icon" width="96">
 
 # MATBridge
 
