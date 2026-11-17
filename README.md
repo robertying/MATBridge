@@ -1,3 +1,5 @@
+<img src="icon/matbridge.svg" alt="MATBridge icon" width="128" align="right">
+
 # MATBridge
 
 MATBridge sends **all of your Mac's audio** to an HDMI TV, receiver or soundbar as **lossless Dolby TrueHD 5.1**, packed in Dolby MAT, and lets Apple Music send **Dolby Atmos** to the same device. It solves two problems that macOS has with HDMI audio:

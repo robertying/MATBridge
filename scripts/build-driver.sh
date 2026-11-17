@@ -40,6 +40,8 @@ git -C "$src" reset -q --hard "$tag^{commit}"
 git -C "$src" apply "$PWD/driver/reported-output-latency.patch"
 git -C "$src" apply "$PWD/driver/shared-memory-mix.patch"
 git -C "$src" apply "$PWD/driver/hdmi-passthrough.patch"
+# The device icon (icon/make-icon.sh regenerates it from icon/matbridge.svg); replaces BlackHole's, same file name.
+cp "$PWD/driver/MATBridge.icns" "$src/BlackHole/BlackHole.icns"
 
 latency_us=$(( latency_ms * 1000 ))
 bundle=io.ruiying.matbridge.driver

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2b1b5e"/><stop offset="1" stop-color="#0b0a1f"/>
+    </linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5eead4"/><stop offset="0.5" stop-color="#7c9cff"/><stop offset="1" stop-color="#c084fc"/>
+    </linearGradient>
+    <clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
+    <g fill="url(#g)" opacity="0.8">
+      <rect x="252.3" y="551.6" width="26" height="98.4" rx="13"/>
+      <rect x="301.7" y="460.0" width="26" height="190.0" rx="13"/>
+      <rect x="351.0" y="381.3" width="26" height="268.7" rx="13"/>
+      <rect x="400.3" y="320.9" width="26" height="329.1" rx="13"/>
+      <rect x="449.7" y="282.9" width="26" height="367.1" rx="13"/>
+      <rect x="499.0" y="270.0" width="26" height="380.0" rx="13"/>
+      <rect x="548.3" y="282.9" width="26" height="367.1" rx="13"/>
+      <rect x="597.7" y="320.9" width="26" height="329.1" rx="13"/>
+      <rect x="647.0" y="381.3" width="26" height="268.7" rx="13"/>
+      <rect x="696.3" y="460.0" width="26" height="190.0" rx="13"/>
+      <rect x="745.7" y="551.6" width="26" height="98.4" rx="13"/>
+    </g>
+    <path d="M216.0 650.0 L225.9 630.1 L235.7 610.3 L245.6 590.6 L255.5 571.0 L265.3 551.6 L275.2 532.6 L285.1 513.8 L294.9 495.4 L304.8 477.5 L314.7 460.0 L324.5 443.0 L334.4 426.6 L344.3 410.9 L354.1 395.7 L364.0 381.3 L373.9 367.6 L383.7 354.7 L393.6 342.6 L403.5 331.3 L413.3 320.9 L423.2 311.4 L433.1 302.9 L442.9 295.2 L452.8 288.6 L462.7 282.9 L472.5 278.3 L482.4 274.7 L492.3 272.1 L502.1 270.5 L512.0 270.0 L521.9 270.5 L531.7 272.1 L541.6 274.7 L551.5 278.3 L561.3 282.9 L571.2 288.6 L581.1 295.2 L590.9 302.9 L600.8 311.4 L610.7 320.9 L620.5 331.3 L630.4 342.6 L640.3 354.7 L650.1 367.6 L660.0 381.3 L669.9 395.7 L679.7 410.9 L689.6 426.6 L699.5 443.0 L709.3 460.0 L719.2 477.5 L729.1 495.4 L738.9 513.8 L748.8 532.6 L758.7 551.6 L768.5 571.0 L778.4 590.6 L788.3 610.3 L798.1 630.1 L808.0 650.0" fill="none" stroke="url(#g)" stroke-width="36" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="150" y="634" width="724" height="40" rx="20" fill="url(#g)"/>
+    <!-- water ripple under the deck -->
+    <path d="M200 740 q40 -26 80 0 t80 0 t80 0 t80 0 t80 0 t80 0 t80 0" fill="none" stroke="#7c9cff" stroke-width="16" stroke-linecap="round" opacity="0.4"/>
+    <path d="M260 800 q40 -26 80 0 t80 0 t80 0 t80 0 t80 0 t80 0" fill="none" stroke="#7c9cff" stroke-width="16" stroke-linecap="round" opacity="0.22"/>
+  </g>
+</svg>
