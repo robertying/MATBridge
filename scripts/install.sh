@@ -46,7 +46,20 @@ EOF
 # Sign with the first Developer ID, else Apple Development identity, else ad hoc.
 identity=$(security find-identity -v -p codesigning | sed -nE 's/.*"(Developer ID Application: [^"]+)".*/\1/p' | head -1)
 [[ -z $identity ]] && identity=$(security find-identity -v -p codesigning | sed -nE 's/.*"(Apple Development: [^"]+)".*/\1/p' | head -1)
-codesign --force --sign "${identity:--}" "$app"
+# Hardened runtime. FFmpeg from Homebrew isn't signed by the same team, so library validation is turned off for
+# its libraries to load.
+entitlements=$(mktemp)
+cat > "$entitlements" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict>
+</plist>
+EOF
+codesign --force --options runtime --entitlements "$entitlements" --sign "${identity:--}" "$app"
+rm -f "$entitlements"
 echo "signed:    ${identity:-ad hoc}"
 
 args_xml="    <string>$bin</string>

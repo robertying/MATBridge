@@ -12,12 +12,16 @@ import Synchronization
 /// only passes Dolby through when the default output (the virtual device) reports HDMI and lists them.
 enum DolbyFormats {
     static let selector = code("mbdf")  // MATB_DOLBY_FORMATS_SELECTOR
+    static let maxFormats = 32          // kMATB_MaxDolbyFormats
     private static var warned = false
 
     /// Copies the TV's encoded formats to the virtual device: none without a TV. Cheap; safe to call every tick.
     static func sync(src: AudioObjectID, tv: AudioObjectID?) {
-        let want = tv.flatMap { CA.streams($0, kAudioObjectPropertyScopeOutput).first }
-            .map { CA.availablePhysicalRanged($0).filter { $0.mFormat.mFormatID != kAudioFormatLinearPCM } } ?? []
+        // Exactly what the driver keeps (encoded, non-zero format IDs, at most 32), so a TV offering more still
+        // compares equal once set instead of being set again every second.
+        let offered = tv.flatMap { CA.streams($0, kAudioObjectPropertyScopeOutput).first }.map(CA.availablePhysicalRanged) ?? []
+        let want = Array(offered.filter { $0.mFormat.mFormatID != kAudioFormatLinearPCM && $0.mFormat.mFormatID != 0 }
+            .prefix(maxFormats))
         let wantData = want.withUnsafeBytes { Data($0) }
         guard let have = current(src) else {
             if !warned { warned = true; log("the virtual device has no Dolby format list (old driver?); Music will not pass Dolby through. Reinstall the driver: scripts/build-driver.sh, scripts/install-driver.sh") }

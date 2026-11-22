@@ -152,6 +152,16 @@ enum CA {
     }
 
     static func pidAlive(_ pid: Int32) -> Bool { pid > 0 && (kill(pid, 0) == 0 || errno == EPERM) }
+
+    /// True if `pid` runs the same executable as this process (a MATBridge worker).
+    static func runsSameExecutable(_ pid: Int32) -> Bool {
+        func path(_ p: Int32) -> String? {
+            var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))  // PROC_PIDPATHINFO_MAXSIZE
+            return proc_pidpath(p, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : nil
+        }
+        guard let theirs = path(pid), let mine = path(getpid()) else { return false }
+        return theirs == mine
+    }
 }
 
 func labelName(_ l: AudioChannelLabel) -> String {

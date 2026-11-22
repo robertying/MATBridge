@@ -20,7 +20,8 @@ enum Recovery {
         }
         let me = getpid()
         if let owner = CA.i32(tv, kAudioDevicePropertyHogMode), owner != -1 {
-            if owner == me || !CA.pidAlive(owner) || owner == saved?.workerPID {
+            // The saved worker PID alone isn't proof: after a reboot another app (Music holding the TV) can have it.
+            if owner == me || !CA.pidAlive(owner) || (owner == saved?.workerPID && CA.runsSameExecutable(owner)) {
                 let st = CA.setI32(tv, kAudioDevicePropertyHogMode, -1)
                 log("recover: released hog held by pid \(owner) -> status \(st), now \(CA.i32(tv, kAudioDevicePropertyHogMode) ?? -99)")
             } else {

@@ -242,6 +242,7 @@ void *thb_wg_join_device(uint32_t dev) {
     UInt32 size = sizeof(wg);
     if (AudioObjectGetPropertyData(dev, &a, 0, NULL, &size, &wg) != noErr || !wg) return NULL;
     struct thb_wg *h = calloc(1, sizeof(*h));
+    if (!h) { os_release(wg); return NULL; }
     h->wg = wg;
     if (os_workgroup_join(wg, &h->token) != 0) { os_release(wg); free(h); return NULL; }
     return h;

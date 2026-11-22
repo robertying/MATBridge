@@ -183,7 +183,8 @@ not from the EDID, and the Core Audio transport stayed `'dprt'`.
   `AudioStreamRangedDescription`); the driver appends them to the output stream's available physical formats and
   asks the HAL for a configuration change so the new list is seen. With no TV, the list is empty. Setting one of these
   formats is refused, so the virtual device never carries a bitstream. Like any device property, any local app can
-  change the list; the driver only accepts encoded (non-PCM) entries, at most 32.
+  change the list; the driver only accepts encoded (non-PCM) entries, at most 32, and spaces the configuration
+  changes (each pauses IO briefly) at least 2 seconds apart, so rewriting the list in a loop can't stutter playback.
 - **MATBridge keeps the TV while Music plays**, and Music's stereo and lossless tracks are encoded like any other
   audio. It releases the TV only when Music builds a Dolby queue: `MusicLog` runs
   `log stream --predicate 'process == "Music" AND eventMessage CONTAINS "subaq_buildCAAudioQueue" AND eventMessage CONTAINS "Creating AudioQueue"'`

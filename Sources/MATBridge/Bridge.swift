@@ -96,7 +96,13 @@ final class Bridge {
                 let i = n.userInfo ?? [:]
                 let track = (i["PersistentID"]).map { "\($0)" }
                     ?? [i["Name"], i["Artist"], i["Album"]].map { "\($0 ?? "")" }.joined(separator: "|")
-                self?.musicChanged(i["Player State"] as? String ?? "?", track: track)
+                let state = i["Player State"] as? String ?? "?"
+                // Player-state notifications only count while Music is running.
+                if state == "Playing", NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty {
+                    log("ignored a Music \"Playing\" notification while Music isn't running")
+                    return
+                }
+                self?.musicChanged(state, track: track)
             })
             // Music only announces changes, so one already playing when we start would otherwise lose the TV to us.
             if CA.musicOutputState() == .sending {

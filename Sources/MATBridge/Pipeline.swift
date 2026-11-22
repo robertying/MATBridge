@@ -51,8 +51,14 @@ final class Pipeline: @unchecked Sendable {
         burstBytes = codec.burstBytes
         bytesPerFrame = Int64(burstBytes / codec.burstFrames(rate: rate))
         targetFrames = Int64(targetMs * Double(rate) / 1000)
-        pcmRing = thb_ring_create(rate * encChannels * 4)!            // 1 s
-        burstRing = thb_ring_create(burstBytes * 16)!                 // 320 ms of MAT, 512 ms of AC-3
+        guard let pcm = thb_ring_create(rate * encChannels * 4) else {          // 1 s
+            throw ConfigError("out of memory for the PCM buffer")
+        }
+        guard let bursts = thb_ring_create(burstBytes * 16) else {              // 320 ms of MAT, 512 ms of AC-3
+            thb_ring_destroy(pcm)
+            throw ConfigError("out of memory for the burst buffer")
+        }
+        pcmRing = pcm; burstRing = bursts
         silence = .allocate(capacity: burstBytes)
         try Pipeline.makeSilenceBurst(codec: codec, rate: rate, into: silence)
     }

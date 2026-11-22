@@ -76,13 +76,22 @@ final class MusicLog: @unchecked Sendable {   // all state on the main queue
         p.arguments = ["stream", "--style", "compact", "--predicate", Self.predicate]
         let out = Pipe(), err = Pipe()
         p.standardOutput = out; p.standardError = err
+        // Keep stderr drained while it runs, so `log` never blocks on a full pipe; keep the last of it for the exit message.
+        let errTail = ErrTail()
+        err.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil; return }
+            errTail.append(d)
+        }
         out.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
             if d.isEmpty { h.readabilityHandler = nil; return }  // EOF
             DispatchQueue.main.async { self?.received(d) }
         }
         p.terminationHandler = { [weak self] proc in
-            let msg = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            err.fileHandleForReading.readabilityHandler = nil
+            errTail.append(err.fileHandleForReading.readDataToEndOfFile())
+            let msg = String(decoding: errTail.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
             let status = proc.terminationStatus
             DispatchQueue.main.async { self?.exited(proc, status, msg) }
         }
@@ -146,4 +155,16 @@ final class MusicLog: @unchecked Sendable {   // all state on the main queue
         let f = String(rest[..<end])
         return f.isEmpty || f.count > 8 ? nil : f
     }
+}
+
+/// The last few KB of `log stream`'s stderr, appended from its reader thread.
+private final class ErrTail: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buf = Data()
+    func append(_ d: Data) {
+        lock.lock(); defer { lock.unlock() }
+        buf.append(d)
+        if buf.count > 4096 { buf = buf.suffix(4096) }
+    }
+    var data: Data { lock.lock(); defer { lock.unlock() }; return buf }
 }

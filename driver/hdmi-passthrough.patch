@@ -1,8 +1,8 @@
 diff --git a/BlackHole/BlackHole.c b/BlackHole/BlackHole.c
-index 5ae301d..9a28310 100644
+index 5ae301d..bf1b8f1 100644
 --- a/BlackHole/BlackHole.c
 +++ b/BlackHole/BlackHole.c
-@@ -358,6 +358,17 @@ static Float32*                     gRingBuffer = NULL;
+@@ -358,6 +358,22 @@ static Float32*                     gRingBuffer = NULL;
  // process. An existing object of the right size is reused, so a reader's mapping survives a coreaudiod restart.
  static matb_shm_header*             gShm = NULL;
  
@@ -16,11 +16,16 @@ index 5ae301d..9a28310 100644
 +static AudioStreamRangedDescription gMATB_DolbyFormats[kMATB_MaxDolbyFormats];
 +static UInt32                       gMATB_DolbyFormatCount              = 0;
 +#define                             kMATB_ChangeAction_DolbyFormats     100  // see BlackHole_SetDevicePropertyData
++// Each configuration change for the list pauses IO briefly, so these changes are spaced at
++// least this far apart; a change in between is picked up by the next one. Both guarded by gPlugIn_StateMutex.
++#define                             kMATB_DolbyFormatsChangeSpacingNs   2000000000ULL
++static UInt64                       gMATB_DolbyFormatsChangedAt         = 0;      // uptime ns of the last change request
++static Boolean                      gMATB_DolbyFormatsChangePending     = false;  // a request is scheduled
 +
  static void MATB_ShmMapIfNeeded(void)
  {
      if (gShm != NULL) { return; }
-@@ -2043,7 +2054,7 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
+@@ -2043,7 +2059,7 @@ static OSStatus	BlackHole_GetBoxPropertyData(AudioServerPlugInDriverRef inDriver
  			//	any 32 bit integer, but common values for this property are defined in
  			//	<CoreAudio/AudioHardwareBase.h>
  			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetBoxPropertyData: not enough space for the return value of kAudioDevicePropertyTransportType for the box");
@@ -29,7 +34,7 @@ index 5ae301d..9a28310 100644
  			*outDataSize = sizeof(UInt32);
  			break;
  			
-@@ -2256,6 +2267,11 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver,
+@@ -2256,6 +2272,11 @@ static Boolean	BlackHole_HasDeviceProperty(AudioServerPlugInDriverRef inDriver,
  	//	property in the BlackHole_GetDevicePropertyData() method.
  	switch(inAddress->mSelector)
  	{
@@ -41,7 +46,7 @@ index 5ae301d..9a28310 100644
  		case kAudioObjectPropertyBaseClass:
  		case kAudioObjectPropertyClass:
  		case kAudioObjectPropertyOwner:
-@@ -2314,6 +2330,15 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
+@@ -2314,6 +2335,15 @@ static OSStatus	BlackHole_IsDevicePropertySettable(AudioServerPlugInDriverRef in
  	//	property in the BlackHole_GetDevicePropertyData() method.
  	switch(inAddress->mSelector)
  	{
@@ -57,7 +62,7 @@ index 5ae301d..9a28310 100644
  		case kAudioObjectPropertyBaseClass:
  		case kAudioObjectPropertyClass:
  		case kAudioObjectPropertyOwner:
-@@ -2375,6 +2400,15 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
+@@ -2375,6 +2405,15 @@ static OSStatus	BlackHole_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
  	//	property in the BlackHole_GetDevicePropertyData() method.
  	switch(inAddress->mSelector)
  	{
@@ -73,7 +78,7 @@ index 5ae301d..9a28310 100644
  		case kAudioObjectPropertyBaseClass:
  			*outDataSize = sizeof(AudioClassID);
  			break;
-@@ -2511,6 +2545,23 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
+@@ -2511,6 +2550,23 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
  	//	it is necessary to lock the state mutex.
  	switch(inAddress->mSelector)
  	{
@@ -97,7 +102,7 @@ index 5ae301d..9a28310 100644
  		case kAudioObjectPropertyBaseClass:
  			//	The base class for kAudioDeviceClassID is kAudioObjectClassID
  			FailWithAction(inDataSize < sizeof(AudioClassID), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioObjectPropertyBaseClass for the device");
-@@ -2625,7 +2676,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
+@@ -2625,7 +2681,7 @@ static OSStatus	BlackHole_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
  			//	any 32 bit integer, but common values for this property are defined in
  			//	<CoreAudio/AudioHardwareBase.h>
  			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "BlackHole_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyTransportType for the device");
@@ -106,7 +111,7 @@ index 5ae301d..9a28310 100644
  			*outDataSize = sizeof(UInt32);
  			break;
  
-@@ -2960,6 +3011,41 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
+@@ -2960,6 +3016,60 @@ static OSStatus	BlackHole_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
  	//	property in the BlackHole_GetDevicePropertyData() method.
  	switch(inAddress->mSelector)
  	{
@@ -130,6 +135,15 @@ index 5ae301d..9a28310 100644
 +			Boolean theChanged = theCount != gMATB_DolbyFormatCount || memcmp(theKept, gMATB_DolbyFormats, theCount * sizeof(AudioStreamRangedDescription)) != 0;
 +			memcpy(gMATB_DolbyFormats, theKept, theCount * sizeof(AudioStreamRangedDescription));
 +			gMATB_DolbyFormatCount = theCount;
++			Boolean theSchedule = theChanged && !gMATB_DolbyFormatsChangePending;
++			UInt64 theDelay = 0;
++			if (theSchedule)
++			{
++				UInt64 theNow = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++				UInt64 theSince = theNow - gMATB_DolbyFormatsChangedAt;
++				if (gMATB_DolbyFormatsChangedAt != 0 && theSince < kMATB_DolbyFormatsChangeSpacingNs) { theDelay = kMATB_DolbyFormatsChangeSpacingNs - theSince; }
++				gMATB_DolbyFormatsChangePending = true;
++			}
 +			pthread_mutex_unlock(&gPlugIn_StateMutex);
 +			if (theChanged)
 +			{
@@ -139,8 +153,18 @@ index 5ae301d..9a28310 100644
 +				outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
 +				// The HAL caches a stream's format list and only re-reads it in a configuration change (a no-op
 +				// action in BlackHole_PerformDeviceConfigurationChange; IO pauses briefly, and only when the TV's
-+				// formats actually change).
-+				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, kMATB_ChangeAction_DolbyFormats, NULL); });
++				// formats actually change). At most one request is outstanding, and they are kMATB_DolbyFormatsChangeSpacingNs
++				// apart; a request made later reads whatever list is current then.
++				if (theSchedule)
++				{
++					dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)theDelay), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
++						pthread_mutex_lock(&gPlugIn_StateMutex);
++						gMATB_DolbyFormatsChangedAt = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
++						gMATB_DolbyFormatsChangePending = false;
++						pthread_mutex_unlock(&gPlugIn_StateMutex);
++						gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, kMATB_ChangeAction_DolbyFormats, NULL);
++					});
++				}
 +			}
 +			break;
 +		}
@@ -148,7 +172,7 @@ index 5ae301d..9a28310 100644
  		case kAudioDevicePropertyNominalSampleRate:
  			//	Changing the sample rate needs to be handled via the
  			//	RequestConfigChange/PerformConfigChange machinery.
-@@ -3144,6 +3230,12 @@ static OSStatus	BlackHole_GetStreamPropertyDataSize(AudioServerPlugInDriverRef i
+@@ -3144,6 +3254,12 @@ static OSStatus	BlackHole_GetStreamPropertyDataSize(AudioServerPlugInDriverRef i
  		case kAudioStreamPropertyAvailableVirtualFormats:
  		case kAudioStreamPropertyAvailablePhysicalFormats:
  			*outDataSize = kDevice_SampleRatesSize * sizeof(AudioStreamRangedDescription);
@@ -161,7 +185,7 @@ index 5ae301d..9a28310 100644
  			break;
  
  		default:
-@@ -3301,6 +3393,17 @@ static OSStatus	BlackHole_GetStreamPropertyData(AudioServerPlugInDriverRef inDri
+@@ -3301,6 +3417,17 @@ static OSStatus	BlackHole_GetStreamPropertyData(AudioServerPlugInDriverRef inDri
  
  			//	report how much we wrote
  			*outDataSize = theNumberItemsToFetch * sizeof(AudioStreamRangedDescription);

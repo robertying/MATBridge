@@ -52,12 +52,20 @@ case "run":
         log("MATBridge is already running (the login item?); not starting a second one")
         exit(1)
     }
-    // When stdout is a log file (the login item), start it over once it passes 10 MB. It is opened for
-    // appending, so writes simply continue at the new end.
-    var st = stat()
-    if fstat(STDOUT_FILENO, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size > 10_000_000 {
-        ftruncate(STDOUT_FILENO, 0); log("log file was over 10 MB; started over")
+    // When stdout is a log file (the login item), start it over once it passes 10 MB: at start, and every 10 minutes
+    // for a long run. It is opened for appending, so writes (the worker's too, through the same file) simply
+    // continue at the new end.
+    func trimLog() {
+        var st = stat()
+        if fstat(STDOUT_FILENO, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_size > 10_000_000 {
+            ftruncate(STDOUT_FILENO, 0); log("log file was over 10 MB; started over")
+        }
     }
+    trimLog()
+    let logTrimmer = DispatchSource.makeTimerSource(queue: .main)
+    logTrimmer.schedule(deadline: .now() + 600, repeating: 600, leeway: .seconds(60))
+    logTrimmer.setEventHandler(handler: trimLog)
+    logTrimmer.resume()
     let supervisor = Supervisor(config: config, workerArgs: Array(argv.dropFirst()))
     signalSources = onSignals([SIGINT, SIGTERM, SIGHUP]) { sig in supervisor.stop(signal: sig) }
     supervisor.spawn()
