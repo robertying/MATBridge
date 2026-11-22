@@ -97,7 +97,7 @@ final class Bridge {
                 let track = (i["PersistentID"]).map { "\($0)" }
                     ?? [i["Name"], i["Artist"], i["Album"]].map { "\($0 ?? "")" }.joined(separator: "|")
                 let state = i["Player State"] as? String ?? "?"
-                // Player-state notifications only count while Music is running.
+                // Only a "Playing" from a running Music counts; the other states pass through.
                 if state == "Playing", NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty {
                     log("ignored a Music \"Playing\" notification while Music isn't running")
                     return
